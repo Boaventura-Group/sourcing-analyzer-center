@@ -2,7 +2,7 @@
 
 ## 1. Visão geral
 
-Este documento descreve o design técnico para desenvolver um sistema de análise de oportunidades de compra a partir de uma planilha de fornecedor contendo ASINs, EANs, títulos, custo e preço de venda. O sistema será implementado com Cloudflare Worker como orquestrador, integrando Amazon SP-API e Keepa API para validar Buy Box, estimar Amazon fees, enriquecer dados comerciais e retornar apenas produtos com lucro líquido positivo.
+Este documento descreve o design técnico para desenvolver um conector MCP de análise de oportunidades de compra a partir de uma planilha de fornecedor contendo ASINs, EANs, títulos, custo e preço de venda. O sistema será usado no Workspace do usuário pelo agente GPT via chat, sem frontend web próprio. O backend será implementado com Cloudflare Worker como orquestrador, integrando Amazon SP-API e Keepa API para validar Buy Box, estimar Amazon fees, enriquecer dados comerciais e retornar ao agente apenas produtos com lucro líquido positivo.
 
 O fluxo será limitado a 100 ASINs por sessão/lote para manter o processamento controlado. A premissa operacional atual da conta Keepa Pro do grupo é: saldo inicial disponível de 300 tokens e renovação de 5 tokens por minuto. A implementação deve consultar `/token` antes e durante o job, e pausar/reagendar o processamento quando o saldo disponível não cobrir o próximo bloco planejado.
 
@@ -10,7 +10,7 @@ O fluxo será limitado a 100 ASINs por sessão/lote para manter o processamento 
 
 ### 2.1 Objetivo principal
 
-Criar uma API backend em Cloudflare Workers capaz de receber até 100 ASINs por lote, consultar Amazon SP-API e Keepa API, consolidar os dados em um modelo único, calcular lucro líquido e ROI, e devolver uma saída em JSON/CSV/XLSX filtrada apenas por oportunidades com lucro líquido positivo.
+Criar um conector MCP com backend em Cloudflare Workers capaz de receber do agente GPT dados de planilhas com até 100 ASINs por lote, consultar Amazon SP-API e Keepa API, consolidar os dados em um modelo único, calcular lucro líquido e ROI, e devolver ao agente uma saída estruturada em JSON/CSV/XLSX filtrada apenas por oportunidades com lucro líquido positivo.
 
 ### 2.2 Objetivos específicos
 
@@ -26,12 +26,15 @@ Criar uma API backend em Cloudflare Workers capaz de receber até 100 ASINs por 
 - Retornar somente produtos com net profit positivo.
 - Marcar divergências sensíveis de preço para revisão.
 - Controlar rate limit da Amazon e tokens do Keepa.
+- Expor as capacidades do backend como ferramentas MCP consumidas pelo agente GPT no Workspace.
+- Manter o chat do agente GPT como frontend operacional do projeto.
 
 ## 3. Escopo
 
 ### 3.1 Incluído
 
 - Upload/entrada de planilha em CSV ou XLSX.
+- Conector MCP para uso pelo agente GPT no Workspace.
 - Processamento de até 100 ASINs por job.
 - Integração com Amazon Product Pricing API.
 - Integração com Amazon Product Fees API.
@@ -55,6 +58,8 @@ Criar uma API backend em Cloudflare Workers capaz de receber até 100 ASINs por 
 - Forecast de demanda avançado.
 - Cálculo de VAT completo.
 - Integração direta com Xero.
+- Interface web própria ou frontend separado.
+- Dashboard, landing page, UI administrativa ou fluxo de upload fora do agente GPT.
 
 ## 4. Stack proposta
 
@@ -71,7 +76,14 @@ Criar uma API backend em Cloudflare Workers capaz de receber até 100 ASINs por 
 - Amazon SP-API Europe.
 - Keepa API.
 
-### 4.3 Linguagem e bibliotecas
+### 4.3 Superfície de uso
+
+- O produto será consumido como conector MCP no Workspace do usuário.
+- O agente GPT no chat será a interface de uso para enviar planilhas, pedir análises, acompanhar status e receber resultados.
+- Não haverá frontend web próprio nesta fase.
+- Endpoints HTTP internos existem para suportar o conector MCP, processamento assíncrono e auditoria operacional; eles não representam uma UI pública para usuários finais.
+
+### 4.4 Linguagem e bibliotecas
 
 - TypeScript.
 - Wrangler.
@@ -82,11 +94,15 @@ Criar uma API backend em Cloudflare Workers capaz de receber até 100 ASINs por 
 ## 5. Arquitetura de alto nível
 
 ```text
-Fornecedor CSV/XLSX
+Usuário no Workspace
         ↓
-POST /jobs
+Agente GPT no chat
         ↓
-Cloudflare Worker valida arquivo e cria job
+Conector MCP do Sourcing Analyzer Center
+        ↓
+Ferramenta MCP recebe CSV/XLSX ou dados estruturados da planilha
+        ↓
+Cloudflare Worker valida entrada e cria job
         ↓
 D1: jobs + job_items
         ↓
@@ -102,16 +118,16 @@ Normalização + cálculo ROI
         ↓
 D1: resultados
         ↓
-GET /jobs/:id/results
+Conector MCP retorna resultado estruturado ao agente GPT
 ```
 
 ## 6. Componentes
 
 ### 6.1 API Worker
 
-Responsável por receber requisições HTTP, validar payloads, criar jobs, consultar status e entregar resultados.
+Responsável por receber chamadas internas do conector MCP, validar payloads, criar jobs, consultar status e entregar resultados ao agente GPT.
 
-Endpoints internos:
+Endpoints internos de suporte ao MCP:
 
 ```http
 POST /jobs
@@ -524,13 +540,13 @@ Aviso: se o parâmetro estiver errado ou deixar de ser aceito, a busca pode reto
 ### 11.1 Criação do job
 
 ```text
-1. Receber CSV/XLSX ou JSON com itens.
+1. Receber do conector MCP CSV/XLSX ou JSON com itens enviados pelo agente GPT.
 2. Validar campos obrigatórios.
 3. Rejeitar se houver mais de 100 ASINs.
 4. Criar registro em jobs.
 5. Criar registros em job_items.
 6. Enviar mensagem para Cloudflare Queue.
-7. Retornar jobId.
+7. Retornar jobId ao conector MCP para o agente GPT acompanhar o processamento.
 ```
 
 ### 11.2 Processamento do job
@@ -1035,6 +1051,7 @@ Executar somente em exceções. Exemplo:
 
 - O sistema aceita arquivo com até 100 ASINs.
 - O sistema rejeita arquivo com mais de 100 ASINs.
+- O sistema expõe ferramentas MCP para o agente GPT iniciar análise, consultar status e obter resultados.
 - O sistema consulta Keepa para reviews, rating, BSR e drops.
 - O sistema consulta Amazon para Buy Box e estimativas de fees.
 - O sistema calcula Pack corretamente.
@@ -1142,6 +1159,7 @@ Uma fase só é considerada concluída quando:
 - Criar bindings D1, R2, Queue e Durable Objects.
 - Criar schema SQL.
 - Criar rota healthcheck.
+- Criar scaffold MCP para expor ferramentas ao agente GPT no Workspace.
 
 ### Fase 2 — Parser de planilha
 
@@ -1193,18 +1211,21 @@ Uma fase só é considerada concluída quando:
 ## 26. Prompt inicial sugerido para Codex
 
 ```text
-Build a Cloudflare Workers TypeScript backend for a sourcing analyzer.
+Build a Cloudflare Workers TypeScript backend and MCP connector for a sourcing analyzer.
 
 Use this SDD as the source of truth.
 
 Implement the project in phases:
 1. Project scaffold with Wrangler, D1 schema, Queue and Durable Object bindings.
-2. Job API with POST /jobs, GET /jobs/:id and GET /jobs/:id/results.
-3. CSV input parser with max 100 ASIN validation.
-4. Keepa client for /token and /product with domain=2, stats=90, buybox=1, rating=1, history=0.
-5. Amazon SP-API client with LWA refresh token, SigV4 signing, getCompetitiveSummary and getMyFeesEstimates.
-6. Pack detection, price validation, fee estimates, prep fee, net profit and ROI calculation.
-7. CSV result export.
+2. MCP connector tools for the GPT agent to submit spreadsheet data, check job status, and retrieve results.
+3. Internal Job API with POST /jobs, GET /jobs/:id and GET /jobs/:id/results to support the MCP connector.
+4. CSV input parser with max 100 ASIN validation.
+5. Keepa client for /token and /product with domain=2, stats=90, buybox=1, rating=1, history=0.
+6. Amazon SP-API client with LWA refresh token, SigV4 signing, getCompetitiveSummary and getMyFeesEstimates.
+7. Pack detection, price validation, fee estimates, prep fee, net profit and ROI calculation.
+8. CSV result export.
+
+The GPT agent chat is the operational frontend. Do not build a separate web UI, dashboard, or upload interface in this phase.
 
 Keep credentials in Cloudflare secrets only. Do not expose secrets in logs. Use TypeScript types and unit tests for pack detection, price validation and ROI calculation.
 
@@ -1216,6 +1237,8 @@ Every code implementation or code edit must be committed locally, pushed to the 
 ## 27. Decisões finais consolidadas
 
 - Cloudflare Worker será o orquestrador.
+- O projeto será usado como conector MCP no Workspace do usuário.
+- O agente GPT no chat será a interface operacional; não haverá frontend web próprio nesta fase.
 - Lote máximo inicial: 100 ASINs por job.
 - Amazon SP-API será fonte principal para Buy Box atual e estimativas de fees.
 - Keepa será fonte para reviews, rating, BSR, drops, seller/offer count e validação secundária da Buy Box.
