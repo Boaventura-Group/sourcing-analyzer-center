@@ -1,0 +1,9 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sourcing-analyzer-center",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-09",
+  "observability": {
+    "enabled": true
+  }
+}
