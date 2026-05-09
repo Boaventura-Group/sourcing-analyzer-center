@@ -16,6 +16,24 @@ export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>())
 
   seen.add(value);
 
+  if (value instanceof Error) {
+    const sanitizedError: Record<string, unknown> = {
+      name: value.name,
+      message: value.message,
+    };
+
+    if (value.stack) {
+      sanitizedError.stack = value.stack;
+    }
+
+    if (value.cause !== undefined) {
+      sanitizedError.cause = sanitizeLogPayload(value.cause, seen);
+    }
+
+    seen.delete(value);
+    return sanitizedError;
+  }
+
   if (Array.isArray(value)) {
     const sanitizedArray = value.map((item) => sanitizeLogPayload(item, seen));
     seen.delete(value);

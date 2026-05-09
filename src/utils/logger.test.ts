@@ -2,6 +2,42 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logger, sanitizeLogPayload } from './logger';
 
 describe('sanitizeLogPayload', () => {
+  it('preserves Error fields while sanitizing nested cause values', () => {
+    const cause = new Error('token expired');
+    const error = new Error('failed to create job', { cause });
+
+    const sanitized = sanitizeLogPayload(error);
+
+    expect(sanitized).toMatchObject({
+      name: 'Error',
+      message: 'failed to create job',
+      cause: {
+        name: 'Error',
+        message: 'token expired',
+      },
+    });
+    expect(sanitized).toHaveProperty('stack');
+  });
+
+  it('preserves Error fields inside structured payloads', () => {
+    const error = new Error('request failed');
+    error.stack = 'Error: request failed\n    at test';
+
+    expect(
+      sanitizeLogPayload({
+        error,
+        Authorization: 'Bearer secret-token',
+      }),
+    ).toEqual({
+      error: {
+        name: 'Error',
+        message: 'request failed',
+        stack: 'Error: request failed\n    at test',
+      },
+      Authorization: '[REDACTED]',
+    });
+  });
+
   it('redacts known secret fields without changing safe fields', () => {
     expect(
       sanitizeLogPayload({
