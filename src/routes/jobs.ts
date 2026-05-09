@@ -38,21 +38,29 @@ export async function handleCreateJob(request: Request, db: D1Database): Promise
 }
 
 export async function handleGetJobStatus(jobId: string, db: D1Database): Promise<Response> {
-  const response = await getD1JobStatus(db, jobId);
+  try {
+    const response = await getD1JobStatus(db, jobId);
 
-  if (!response) {
-    return jsonError('not_found', 'Job not found', 404);
+    if (!response) {
+      return jsonError('not_found', 'Job not found', 404);
+    }
+
+    return jsonResponse(response);
+  } catch {
+    return jsonError('internal_error', 'Unexpected error', 500);
   }
-
-  return jsonResponse(response);
 }
 
 export async function handleGetJobResults(jobId: string, db: D1Database): Promise<Response> {
-  const response = await getD1JobResults(db, jobId);
+  try {
+    const response = await getD1JobResults(db, jobId);
 
-  if (!response) {
-    return jsonError('not_found', 'Job not found', 404);
+    if (!response) {
+      return jsonError('not_found', 'Job not found', 404);
+    }
+
+    return jsonResponse(response);
+  } catch {
+    return jsonError('internal_error', 'Unexpected error', 500);
   }
-
-  return jsonResponse(response);
 }

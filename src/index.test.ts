@@ -54,6 +54,8 @@ class FakeD1Database {
   readonly jobs = new Map<string, JobRecord>();
   readonly jobItems: JobItemRecord[] = [];
   readonly itemResults: ItemResultRecord[] = [];
+  failNextAll = false;
+  failNextFirst = false;
 
   prepare(sql: string): FakePreparedStatement {
     return new FakePreparedStatement(this, sql);
@@ -113,6 +115,11 @@ class FakeD1Database {
   }
 
   executeFirst<T>(sql: string, values: unknown[]): T | null {
+    if (this.failNextFirst) {
+      this.failNextFirst = false;
+      throw new Error('D1 first failed with token=SECRET');
+    }
+
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
 
     if (normalizedSql.startsWith('SELECT id, status, total_items FROM jobs')) {
@@ -124,6 +131,11 @@ class FakeD1Database {
   }
 
   executeAll<T>(sql: string, values: unknown[]): T[] {
+    if (this.failNextAll) {
+      this.failNextAll = false;
+      throw new Error('D1 all failed with token=SECRET');
+    }
+
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
 
     if (normalizedSql.startsWith('SELECT * FROM item_results')) {
@@ -261,6 +273,24 @@ describe('GET /jobs/:jobId', () => {
       },
     });
   });
+
+  it('normalizes unexpected D1 errors without exposing details', async () => {
+    const env = createTestEnv();
+    env.DB.failNextFirst = true;
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs/job_d1_error'),
+      env,
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'internal_error',
+        message: 'Unexpected error',
+      },
+    });
+  });
 });
 
 describe('GET /jobs/:jobId/results', () => {
@@ -301,6 +331,34 @@ describe('GET /jobs/:jobId/results', () => {
       error: {
         code: 'not_found',
         message: 'Job not found',
+      },
+    });
+  });
+
+  it('normalizes unexpected D1 result errors without exposing details', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'b000test04', supplierCost: 13 }],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+    env.DB.failNextAll = true;
+
+    const response = await worker.fetch(
+      new Request(`https://example.test/jobs/${created.jobId}/results`),
+      env,
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'internal_error',
+        message: 'Unexpected error',
       },
     });
   });
