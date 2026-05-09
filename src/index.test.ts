@@ -265,6 +265,46 @@ describe('POST /jobs', () => {
     ]);
   });
 
+  it('normalizes decimal and thousands separators predictably from CSV money fields', async () => {
+    const env = createTestEnv();
+    const csv = [
+      'ASIN,Cost Price,Sales Price',
+      'b000sep001,"12,99","12,99"',
+      'b000sep002,12.99,12.99',
+      'b000sep003,"1,234","1,234"',
+      'b000sep004,1.234,1.234',
+      'b000sep005,"1,234.56","1,234.56"',
+      'b000sep006,"1.234,56","1.234,56"',
+    ].join('\n');
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: csv,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(201);
+    expect(env.DB.jobItems.map((item) => item.supplier_cost)).toEqual([
+      12.99,
+      12.99,
+      1234,
+      1234,
+      1234.56,
+      1234.56,
+    ]);
+    expect(env.DB.jobItems.map((item) => item.spreadsheet_sales_price)).toEqual([
+      12.99,
+      12.99,
+      1234,
+      1234,
+      1234.56,
+      1234.56,
+    ]);
+  });
+
   it('creates a D1 job from an explicit csv JSON payload', async () => {
     const env = createTestEnv();
 

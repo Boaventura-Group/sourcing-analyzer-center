@@ -51,31 +51,94 @@ function recordValue(record: SupplierCsvRecord, aliases: ReadonlySet<string>): s
   return undefined;
 }
 
+function countOccurrences(value: string, pattern: string): number {
+  return value.split(pattern).length - 1;
+}
+
+function areThousandsGroups(parts: string[]): boolean {
+  const [firstPart, ...remainingParts] = parts;
+
+  return (
+    firstPart !== undefined &&
+    /^\d{1,3}$/.test(firstPart) &&
+    remainingParts.length > 0 &&
+    remainingParts.every((part) => /^\d{3}$/.test(part))
+  );
+}
+
+function normalizeMoneyText(value: string): string | null {
+  const sign = value.startsWith('-') ? '-' : '';
+  const unsigned = sign ? value.slice(1) : value;
+
+  if (unsigned.length === 0 || unsigned.includes('-') || !/^[0-9,.]+$/.test(unsigned)) {
+    return null;
+  }
+
+  const commaCount = countOccurrences(unsigned, ',');
+  const dotCount = countOccurrences(unsigned, '.');
+
+  if (commaCount > 0 && dotCount > 0) {
+    const decimalSeparator = unsigned.lastIndexOf(',') > unsigned.lastIndexOf('.') ? ',' : '.';
+    const thousandsSeparator = decimalSeparator === ',' ? '.' : ',';
+    const [integerPart, decimalPart, ...extraParts] = unsigned.split(decimalSeparator);
+
+    if (
+      integerPart === undefined ||
+      decimalPart === undefined ||
+      extraParts.length > 0 ||
+      !/^\d+$/.test(decimalPart) ||
+      !areThousandsGroups(integerPart.split(thousandsSeparator))
+    ) {
+      return null;
+    }
+
+    return `${sign}${integerPart.replaceAll(thousandsSeparator, '')}.${decimalPart}`;
+  }
+
+  if (commaCount > 0 || dotCount > 0) {
+    const separator = commaCount > 0 ? ',' : '.';
+    const parts = unsigned.split(separator);
+
+    if (parts.length === 2) {
+      const [integerPart, suffix] = parts;
+
+      if (integerPart === undefined || suffix === undefined || !/^\d+$/.test(integerPart)) {
+        return null;
+      }
+
+      if (/^\d{3}$/.test(suffix)) {
+        return `${sign}${integerPart}${suffix}`;
+      }
+
+      if (/^\d{1,2}$/.test(suffix)) {
+        return `${sign}${integerPart}.${suffix}`;
+      }
+
+      return null;
+    }
+
+    if (areThousandsGroups(parts)) {
+      return `${sign}${parts.join('')}`;
+    }
+
+    return null;
+  }
+
+  return /^\d+$/.test(unsigned) ? `${sign}${unsigned}` : null;
+}
+
 function parseMoney(value: string | undefined, path: Array<string | number>, label: string): number {
   if (!value) {
     throw new SupplierInputValidationError([issue(path, `${label} is required`)]);
   }
 
   const compact = value.replace(/\s/g, '').replace(/[^0-9,.-]/g, '');
+  const normalized = normalizeMoneyText(compact);
 
-  if (compact.length === 0 || compact === '-' || compact === '.' || compact === ',') {
+  if (normalized === null) {
     throw new SupplierInputValidationError([issue(path, `${label} must be a valid decimal`)]);
   }
 
-  const lastComma = compact.lastIndexOf(',');
-  const lastDot = compact.lastIndexOf('.');
-  const decimalSeparator =
-    lastComma >= 0 && lastDot >= 0
-      ? lastComma > lastDot
-        ? ','
-        : '.'
-      : lastComma >= 0
-        ? ','
-        : '.';
-  const thousandsSeparator = decimalSeparator === ',' ? '.' : ',';
-  const normalized = compact
-    .replaceAll(thousandsSeparator, '')
-    .replaceAll(decimalSeparator, '.');
   const amount = Number(normalized);
 
   if (!Number.isFinite(amount) || amount <= 0) {
