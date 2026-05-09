@@ -4,7 +4,10 @@ import {
   getD1JobResults,
   getD1JobStatus,
 } from '../jobs/d1JobStore';
+import { parseCsvCreateJobRequest } from '../input/parseCsv';
+import { SupplierInputValidationError } from '../input/normalizeSupplierItems';
 import { createJobRequestSchema } from '../jobs/types';
+import type { CreateJobRequest } from '../jobs/types';
 import { jsonError, jsonResponse, validationError } from '../utils/http';
 
 async function parseJson(request: Request): Promise<unknown> {
@@ -21,15 +24,46 @@ async function parseJson(request: Request): Promise<unknown> {
   }
 }
 
+function isCsvContentType(request: Request): boolean {
+  return request.headers.get('content-type')?.toLowerCase().includes('text/csv') ?? false;
+}
+
+function isExplicitCsvPayload(payload: unknown): payload is { csv: string } {
+  return (
+    typeof payload === 'object' &&
+    payload !== null &&
+    'csv' in payload &&
+    typeof (payload as { csv?: unknown }).csv === 'string'
+  );
+}
+
+async function parseCreateJobRequest(request: Request): Promise<CreateJobRequest> {
+  if (isCsvContentType(request)) {
+    const csv = await request.text();
+    return createJobRequestSchema.parse(parseCsvCreateJobRequest(csv));
+  }
+
+  const payload = await parseJson(request);
+
+  if (isExplicitCsvPayload(payload)) {
+    return createJobRequestSchema.parse(parseCsvCreateJobRequest(payload.csv));
+  }
+
+  return createJobRequestSchema.parse(payload);
+}
+
 export async function handleCreateJob(request: Request, db: D1Database): Promise<Response> {
   try {
-    const payload = await parseJson(request);
-    const createJobRequest = createJobRequestSchema.parse(payload);
+    const createJobRequest = await parseCreateJobRequest(request);
     const response = await createD1Job(db, createJobRequest);
 
     return jsonResponse(response, 201);
   } catch (error) {
     if (error instanceof ZodError) {
+      return validationError(error.issues);
+    }
+
+    if (error instanceof SupplierInputValidationError) {
       return validationError(error.issues);
     }
 
