@@ -310,7 +310,7 @@ Sales Price
 
 ### 9.0 Autenticação Amazon SP-API
 
-Status: `OFICIAL` para o uso de LWA access token nas chamadas SP-API; `DECISAO_INTERNA` para manter este projeto sem credenciais AWS.
+Status: `OFICIAL` para autenticação exigida pela documentação oficial atual da SP-API nas operações usadas; `DECISAO_INTERNA` para proibir SigV4, IAM Role e AWS credentials neste projeto.
 
 - Implementar autenticação Amazon SP-API usando LWA access token.
 - Renovar o access token a partir de `AMAZON_REFRESH_TOKEN`, `AMAZON_LWA_CLIENT_ID` e `AMAZON_LWA_CLIENT_SECRET`.
