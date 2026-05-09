@@ -21,7 +21,7 @@ describe('MCP conceptual contracts', () => {
     });
     const output = createSourcingJobContract.outputSchema.parse({
       jobId: 'job_000001',
-      status: 'queued',
+      status: 'QUEUED',
       itemCount: 1,
     });
 

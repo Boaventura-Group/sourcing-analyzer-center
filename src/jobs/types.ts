@@ -1,6 +1,14 @@
 import { z } from 'zod';
 
-export const jobStatusSchema = z.enum(['queued', 'running', 'completed', 'failed']);
+export const jobStatusSchema = z.enum([
+  'CREATED',
+  'QUEUED',
+  'PROCESSING',
+  'COMPLETED',
+  'FAILED',
+]);
+
+export const jobItemStatusSchema = z.enum(['CREATED', 'PROCESSING', 'COMPLETED', 'FAILED']);
 
 export const asinSchema = z
   .string()
@@ -35,6 +43,7 @@ export const jobResultsResponseSchema = z.object({
 });
 
 export type JobStatus = z.infer<typeof jobStatusSchema>;
+export type JobItemStatus = z.infer<typeof jobItemStatusSchema>;
 export type SupplierItemInput = z.infer<typeof supplierItemInputSchema>;
 export type CreateJobRequest = z.infer<typeof createJobRequestSchema>;
 export type CreateJobResponse = z.infer<typeof createJobResponseSchema>;
