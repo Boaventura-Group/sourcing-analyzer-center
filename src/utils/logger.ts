@@ -3,22 +3,34 @@ type LogMethod = (message: string, payload?: LogPayload) => void;
 
 const SECRET_FIELD_PATTERN = /(authorization|x-amz-access-token|api[_-]?key|secret|token|credential|password)/i;
 const REDACTED = '[REDACTED]';
+const CIRCULAR = '[Circular]';
 
-export function sanitizeLogPayload(value: unknown): unknown {
-  if (Array.isArray(value)) {
-    return value.map((item) => sanitizeLogPayload(item));
-  }
-
+export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>()): unknown {
   if (!value || typeof value !== 'object') {
     return value;
   }
 
-  return Object.fromEntries(
+  if (seen.has(value)) {
+    return CIRCULAR;
+  }
+
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const sanitizedArray = value.map((item) => sanitizeLogPayload(item, seen));
+    seen.delete(value);
+    return sanitizedArray;
+  }
+
+  const sanitizedObject = Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
       key,
-      SECRET_FIELD_PATTERN.test(key) ? REDACTED : sanitizeLogPayload(entry),
+      SECRET_FIELD_PATTERN.test(key) ? REDACTED : sanitizeLogPayload(entry, seen),
     ]),
   );
+
+  seen.delete(value);
+  return sanitizedObject;
 }
 
 function writeLog(method: 'info' | 'warn' | 'error', message: string, payload?: LogPayload): void {

@@ -21,6 +21,26 @@ describe('sanitizeLogPayload', () => {
       },
     });
   });
+
+  it('returns Circular when a circular object reference is detected', () => {
+    const payload: { status: string; self?: unknown } = { status: 'ok' };
+    payload.self = payload;
+
+    expect(sanitizeLogPayload(payload)).toEqual({
+      status: 'ok',
+      self: '[Circular]',
+    });
+  });
+
+  it('sanitizes arrays and returns Circular for circular array references', () => {
+    const payload: unknown[] = [{ Authorization: 'Bearer secret-token' }];
+    payload.push(payload);
+
+    expect(sanitizeLogPayload(payload)).toEqual([
+      { Authorization: '[REDACTED]' },
+      '[Circular]',
+    ]);
+  });
 });
 
 describe('logger', () => {
