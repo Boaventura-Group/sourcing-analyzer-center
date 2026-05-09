@@ -5,7 +5,21 @@ const SECRET_FIELD_PATTERN = /(authorization|x-amz-access-token|api[_-]?key|secr
 const REDACTED = '[REDACTED]';
 const CIRCULAR = '[Circular]';
 
+function redactSecretsInString(value: string): string {
+  return value
+    .replace(/Authorization\s*:\s*Bearer\s+[^\s,;]+/gi, `Authorization: Bearer ${REDACTED}`)
+    .replace(/\bBearer\s+[^\s,;]+/gi, `Bearer ${REDACTED}`)
+    .replace(
+      /\b(KEEPA_API_KEY|AMAZON_REFRESH_TOKEN|api[_-]?key|token|secret)\s*=\s*[^\s,;&]+/gi,
+      (_match, key: string) => `${key}=${REDACTED}`,
+    );
+}
+
 export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') {
+    return redactSecretsInString(value);
+  }
+
   if (!value || typeof value !== 'object') {
     return value;
   }
@@ -19,11 +33,11 @@ export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>())
   if (value instanceof Error) {
     const sanitizedError: Record<string, unknown> = {
       name: value.name,
-      message: value.message,
+      message: redactSecretsInString(value.message),
     };
 
     if (value.stack) {
-      sanitizedError.stack = value.stack;
+      sanitizedError.stack = redactSecretsInString(value.stack);
     }
 
     if (value.cause !== undefined) {
