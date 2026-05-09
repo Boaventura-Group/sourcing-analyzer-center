@@ -2,6 +2,77 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logger, sanitizeLogPayload } from './logger';
 
 describe('sanitizeLogPayload', () => {
+  it('redacts secrets from Error message and stack while preserving fields', () => {
+    const error = new Error(
+      'Amazon failed with Authorization: Bearer fake-access-token and KEEPA_API_KEY=fake-keepa-key',
+    );
+    error.stack =
+      'Error: token=stack-token\n    at request with AMAZON_REFRESH_TOKEN=refresh-token';
+
+    expect(sanitizeLogPayload(error)).toEqual({
+      name: 'Error',
+      message:
+        'Amazon failed with Authorization: Bearer [REDACTED] and KEEPA_API_KEY=[REDACTED]',
+      stack: 'Error: token=[REDACTED]\n    at request with AMAZON_REFRESH_TOKEN=[REDACTED]',
+    });
+  });
+
+  it('redacts secrets from string causes and regular string payload values', () => {
+    const error = new Error('request failed', {
+      cause: 'upstream returned api_key=fake-api-key and secret=fake-secret',
+    });
+
+    expect(
+      sanitizeLogPayload({
+        error,
+        detail: 'retry failed with Bearer fake-bearer-token and token=fake-token',
+      }),
+    ).toMatchObject({
+      error: {
+        name: 'Error',
+        message: 'request failed',
+        cause: 'upstream returned api_key=[REDACTED] and secret=[REDACTED]',
+      },
+      detail: 'retry failed with Bearer [REDACTED] and token=[REDACTED]',
+    });
+  });
+
+  it('preserves Error fields while sanitizing nested cause values', () => {
+    const cause = new Error('token expired');
+    const error = new Error('failed to create job', { cause });
+
+    const sanitized = sanitizeLogPayload(error);
+
+    expect(sanitized).toMatchObject({
+      name: 'Error',
+      message: 'failed to create job',
+      cause: {
+        name: 'Error',
+        message: 'token expired',
+      },
+    });
+    expect(sanitized).toHaveProperty('stack');
+  });
+
+  it('preserves Error fields inside structured payloads', () => {
+    const error = new Error('request failed');
+    error.stack = 'Error: request failed\n    at test';
+
+    expect(
+      sanitizeLogPayload({
+        error,
+        Authorization: 'Bearer secret-token',
+      }),
+    ).toEqual({
+      error: {
+        name: 'Error',
+        message: 'request failed',
+        stack: 'Error: request failed\n    at test',
+      },
+      Authorization: '[REDACTED]',
+    });
+  });
+
   it('redacts known secret fields without changing safe fields', () => {
     expect(
       sanitizeLogPayload({

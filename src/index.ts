@@ -1,4 +1,6 @@
 import { handleHealthCheck } from './routes/health';
+import { handleCreateJob, handleGetJobResults, handleGetJobStatus } from './routes/jobs';
+import { jsonError } from './utils/http';
 
 export type Env = Record<string, never>;
 
@@ -10,12 +12,25 @@ export default {
       return handleHealthCheck();
     }
 
-    return Response.json(
-      { error: 'not_found' },
-      {
-        status: 404,
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-      },
-    );
+    if (request.method === 'POST' && url.pathname === '/jobs') {
+      return handleCreateJob(request);
+    }
+
+    const jobPathMatch = /^\/jobs\/([^/]+)(?:\/(results))?$/.exec(url.pathname);
+
+    if (jobPathMatch) {
+      const jobId = decodeURIComponent(jobPathMatch[1] ?? '');
+      const subResource = jobPathMatch[2];
+
+      if (request.method === 'GET' && subResource === undefined) {
+        return handleGetJobStatus(jobId);
+      }
+
+      if (request.method === 'GET' && subResource === 'results') {
+        return handleGetJobResults(jobId);
+      }
+    }
+
+    return jsonError('not_found', 'Route not found', 404);
   },
 } satisfies ExportedHandler<Env>;
