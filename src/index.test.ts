@@ -265,6 +265,28 @@ describe('POST /jobs', () => {
     ]);
   });
 
+  it('uses the next matching column alias when the first alias value is empty', async () => {
+    const env = createTestEnv();
+    const csv = ['ASIN,Cost,Cost Price', 'B000TEST10,,10.50'].join('\n');
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: csv,
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(201);
+    expect(env.DB.jobItems).toMatchObject([
+      {
+        asin: 'B000TEST10',
+        supplier_cost: 10.5,
+      },
+    ]);
+  });
+
   it('normalizes decimal and thousands separators predictably from CSV money fields', async () => {
     const env = createTestEnv();
     const csv = [

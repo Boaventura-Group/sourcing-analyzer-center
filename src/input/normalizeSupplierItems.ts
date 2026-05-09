@@ -45,7 +45,10 @@ function recordValue(record: SupplierCsvRecord, aliases: ReadonlySet<string>): s
     }
 
     const text = String(value ?? '').trim();
-    return text.length > 0 ? text : undefined;
+
+    if (text.length > 0) {
+      return text;
+    }
   }
 
   return undefined;
