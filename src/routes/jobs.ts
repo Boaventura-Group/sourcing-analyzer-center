@@ -1,9 +1,9 @@
 import { ZodError } from 'zod';
 import {
-  createInMemoryJob,
-  getInMemoryJobResults,
-  getInMemoryJobStatus,
-} from '../jobs/jobStore';
+  createD1Job,
+  getD1JobResults,
+  getD1JobStatus,
+} from '../jobs/d1JobStore';
 import { createJobRequestSchema } from '../jobs/types';
 import { jsonError, jsonResponse, validationError } from '../utils/http';
 
@@ -21,11 +21,11 @@ async function parseJson(request: Request): Promise<unknown> {
   }
 }
 
-export async function handleCreateJob(request: Request): Promise<Response> {
+export async function handleCreateJob(request: Request, db: D1Database): Promise<Response> {
   try {
     const payload = await parseJson(request);
     const createJobRequest = createJobRequestSchema.parse(payload);
-    const response = createInMemoryJob(createJobRequest);
+    const response = await createD1Job(db, createJobRequest);
 
     return jsonResponse(response, 201);
   } catch (error) {
@@ -37,22 +37,30 @@ export async function handleCreateJob(request: Request): Promise<Response> {
   }
 }
 
-export function handleGetJobStatus(jobId: string): Response {
-  const response = getInMemoryJobStatus(jobId);
+export async function handleGetJobStatus(jobId: string, db: D1Database): Promise<Response> {
+  try {
+    const response = await getD1JobStatus(db, jobId);
 
-  if (!response) {
-    return jsonError('not_found', 'Job not found', 404);
+    if (!response) {
+      return jsonError('not_found', 'Job not found', 404);
+    }
+
+    return jsonResponse(response);
+  } catch {
+    return jsonError('internal_error', 'Unexpected error', 500);
   }
-
-  return jsonResponse(response);
 }
 
-export function handleGetJobResults(jobId: string): Response {
-  const response = getInMemoryJobResults(jobId);
+export async function handleGetJobResults(jobId: string, db: D1Database): Promise<Response> {
+  try {
+    const response = await getD1JobResults(db, jobId);
 
-  if (!response) {
-    return jsonError('not_found', 'Job not found', 404);
+    if (!response) {
+      return jsonError('not_found', 'Job not found', 404);
+    }
+
+    return jsonResponse(response);
+  } catch {
+    return jsonError('internal_error', 'Unexpected error', 500);
   }
-
-  return jsonResponse(response);
 }

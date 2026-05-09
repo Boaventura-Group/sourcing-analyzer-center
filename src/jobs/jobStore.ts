@@ -27,7 +27,7 @@ export function createInMemoryJob(request: CreateJobRequest): CreateJobResponse 
   const jobId = createJobId();
   const job: StoredJob = {
     jobId,
-    status: 'queued',
+    status: 'QUEUED',
     items: request.items,
   };
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createJobRequestSchema } from './types';
+import { createJobRequestSchema, jobStatusSchema } from './types';
 
 const validItem = {
   asin: 'b000test01',
@@ -39,5 +39,22 @@ describe('createJobRequestSchema', () => {
     });
 
     expect(result.success).toBe(false);
+  });
+});
+
+describe('jobStatusSchema', () => {
+  it('uses the canonical Phase 3 uppercase statuses', () => {
+    expect(jobStatusSchema.options).toEqual([
+      'CREATED',
+      'QUEUED',
+      'PROCESSING',
+      'COMPLETED',
+      'FAILED',
+    ]);
+  });
+
+  it('rejects legacy lowercase statuses', () => {
+    expect(jobStatusSchema.safeParse('queued').success).toBe(false);
+    expect(jobStatusSchema.safeParse('running').success).toBe(false);
   });
 });
