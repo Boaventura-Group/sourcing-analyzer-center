@@ -6,6 +6,34 @@ export type JobQueueMessage = {
   schemaVersion: typeof JOB_QUEUE_SCHEMA_VERSION;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+export function parseJobQueueMessage(body: unknown): JobQueueMessage | null {
+  if (!isRecord(body)) {
+    return null;
+  }
+
+  const { jobId, timestamp, schemaVersion } = body;
+
+  if (
+    typeof jobId !== 'string' ||
+    jobId.trim().length === 0 ||
+    typeof timestamp !== 'string' ||
+    timestamp.trim().length === 0 ||
+    schemaVersion !== JOB_QUEUE_SCHEMA_VERSION
+  ) {
+    return null;
+  }
+
+  return {
+    jobId,
+    timestamp,
+    schemaVersion,
+  };
+}
+
 export function createJobQueueMessage(jobId: string, now = new Date()): JobQueueMessage {
   return {
     jobId,

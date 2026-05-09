@@ -2,6 +2,7 @@ import { handleHealthCheck } from './routes/health';
 import { handleCreateJob, handleGetJobResults, handleGetJobStatus } from './routes/jobs';
 import { jsonError } from './utils/http';
 import { processJobQueueMessage } from './jobs/processJob';
+import { parseJobQueueMessage } from './jobs/jobQueue';
 import type { JobQueueMessage } from './jobs/jobQueue';
 import { logger } from './utils/logger';
 
@@ -42,7 +43,16 @@ export default {
 
   async queue(batch, env): Promise<void> {
     for (const message of batch.messages) {
-      const body = message.body as JobQueueMessage;
+      const body = parseJobQueueMessage(message.body);
+
+      if (!body) {
+        // Malformed queue bodies are poison messages, so discard them with ack.
+        logger.warn('Malformed job queue message discarded', {
+          bodyType: typeof message.body,
+        });
+        message.ack();
+        continue;
+      }
 
       try {
         await processJobQueueMessage(env.DB, body);

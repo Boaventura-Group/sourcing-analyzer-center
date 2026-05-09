@@ -75,6 +75,7 @@ export async function handleCreateJob(
         'job_enqueue_failed',
         'Job was created but could not be queued for processing',
         503,
+        response,
       );
     }
 

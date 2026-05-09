@@ -258,13 +258,20 @@ describe('POST /jobs', () => {
     );
 
     expect(response.status).toBe(503);
+    const createdJobId = Array.from(env.DB.jobs.keys())[0];
     await expect(response.json()).resolves.toEqual({
       error: {
         code: 'job_enqueue_failed',
         message: 'Job was created but could not be queued for processing',
+        details: {
+          jobId: createdJobId,
+          status: 'QUEUED',
+          itemCount: 1,
+        },
       },
     });
     expect(env.DB.jobs.size).toBe(1);
+    expect(env.JOB_QUEUE.sentMessages).toHaveLength(0);
   });
 
   it('returns standardized validation errors for invalid payloads', async () => {
@@ -587,6 +594,25 @@ describe('GET /jobs/:jobId', () => {
 });
 
 describe('queue consumer', () => {
+  function queueBatchForBody(
+    body: unknown,
+    controls: { ack: () => void; retry: () => void },
+  ): MessageBatch<unknown> {
+    return {
+      queue: 'sourcing-analyzer-jobs',
+      metadata: {},
+      messages: [
+        {
+          body,
+          ack: controls.ack,
+          retry: controls.retry,
+        },
+      ],
+      ackAll: () => {},
+      retryAll: () => {},
+    } as unknown as MessageBatch<unknown>;
+  }
+
   it('worker queue handler processes queued job messages', async () => {
     const env = createTestEnv();
     env.DB.jobs.set('job_worker_queue', {
@@ -597,30 +623,40 @@ describe('queue consumer', () => {
     let acknowledged = false;
 
     await worker.queue?.(
-      {
-        queue: 'sourcing-analyzer-jobs',
-        metadata: {},
-        messages: [
-          {
-            body: {
-              jobId: 'job_worker_queue',
-              timestamp: new Date().toISOString(),
-              schemaVersion: 1,
-            },
-            ack: () => {
-              acknowledged = true;
-            },
+      queueBatchForBody(
+        {
+          jobId: 'job_worker_queue',
+          timestamp: new Date().toISOString(),
+          schemaVersion: 1,
+        },
+        {
+          ack: () => {
+            acknowledged = true;
           },
-        ],
-        ackAll: () => {},
-        retryAll: () => {},
-      } as unknown as MessageBatch<JobQueueMessage>,
+          retry: () => {},
+        },
+      ),
       env,
     );
 
     expect(env.DB.jobs.get('job_worker_queue')?.status).toBe('PROCESSING');
     expect(acknowledged).toBe(true);
   });
+
+  it.each([null, 'not-json', 42, {}, { jobId: 'job_1' }, { jobId: 'job_1', schemaVersion: 2 }])(
+    'acks and discards malformed queue bodies without throwing: %s',
+    async (body) => {
+      const env = createTestEnv();
+      const ack = vi.fn();
+      const retry = vi.fn();
+
+      await expect(worker.queue?.(queueBatchForBody(body, { ack, retry }), env)).resolves.toBeUndefined();
+
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(retry).not.toHaveBeenCalled();
+      expect(env.DB.jobs.size).toBe(0);
+    },
+  );
 
   it('ignores messages for jobs that do not exist', async () => {
     const env = createTestEnv();
