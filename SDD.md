@@ -6,6 +6,25 @@ Este documento descreve o design técnico para desenvolver um conector MCP de an
 
 O fluxo será limitado a 100 ASINs por sessão/lote para manter o processamento controlado. A premissa operacional atual da conta Keepa Pro do grupo é: saldo inicial disponível de 300 tokens e renovação de 5 tokens por minuto. A implementação deve consultar `/token` antes e durante o job, e pausar/reagendar o processamento quando o saldo disponível não cobrir o próximo bloco planejado.
 
+## 1.1 Hierarquia normativa e status das regras
+
+Este SDD é uma especificação interna controlada do projeto, não uma fonte normativa absoluta.
+
+- Documentação oficial atual prevalece sobre este SDD.
+- Respostas reais autenticadas das APIs prevalecem sobre premissas internas.
+- Decisões internas devem ser marcadas como `DECISAO_INTERNA`.
+- Premissas operacionais de conta devem ser marcadas como `PREMISSA_OPERACIONAL`.
+- Itens que exigem teste real devem ser marcados como `PENDENTE_SMOKE`.
+- Itens que exigem portal autenticado devem ser marcados como `PENDENTE_PORTAL`.
+
+Status usados neste documento:
+
+- `OFICIAL`: regra baseada em documentação oficial atual ou comportamento autenticado confirmado.
+- `DECISAO_INTERNA`: decisão arquitetural ou operacional do projeto.
+- `PREMISSA_OPERACIONAL`: premissa de conta, ambiente ou operação que deve ser validada em runtime.
+- `PENDENTE_SMOKE`: item bloqueado por teste real controlado.
+- `PENDENTE_PORTAL`: item bloqueado por validação em portal autenticado.
+
 ## 2. Objetivos
 
 ### 2.1 Objetivo principal
@@ -246,9 +265,6 @@ Variáveis necessárias no Worker:
 AMAZON_LWA_CLIENT_ID
 AMAZON_LWA_CLIENT_SECRET
 AMAZON_REFRESH_TOKEN
-AMAZON_AWS_ACCESS_KEY_ID
-AMAZON_AWS_SECRET_ACCESS_KEY
-AMAZON_ROLE_ARN
 AMAZON_REGION=eu-west-1
 AMAZON_SPAPI_ENDPOINT=https://sellingpartnerapi-eu.amazon.com
 AMAZON_MARKETPLACE_ID=A1F83G8C2ARO7P
@@ -291,6 +307,16 @@ Sales Price
 - Reaproveitar resultados de API por ASIN dentro do mesmo job.
 
 ## 9. Endpoints Amazon SP-API
+
+### 9.0 Autenticação Amazon SP-API
+
+Status: `OFICIAL` para o uso de LWA access token nas chamadas SP-API; `DECISAO_INTERNA` para manter este projeto sem credenciais AWS.
+
+- Implementar autenticação Amazon SP-API usando LWA access token.
+- Renovar o access token a partir de `AMAZON_REFRESH_TOKEN`, `AMAZON_LWA_CLIENT_ID` e `AMAZON_LWA_CLIENT_SECRET`.
+- Enviar somente headers e credenciais exigidos pela documentação oficial atual da SP-API para as operações usadas.
+- Não implementar SigV4, IAM Role ou AWS credentials.
+- Quando houver divergência entre este SDD, documentação oficial e comportamento autenticado real, prevalece a hierarquia normativa da seção 1.1.
 
 ### 9.1 Buy Box / Featured Offer
 
@@ -375,6 +401,8 @@ A integração Keepa deve seguir este SDD em conjunto com a referência interna 
 
 ### 10.1 Produto principal com Buy Box, rating, reviews, BSR e drops
 
+Status: `OFICIAL` para parâmetros e shape confirmados na referência oficial; `PREMISSA_OPERACIONAL` para estimativa de tokens da conta do grupo.
+
 ```http
 GET https://api.keepa.com/product
 ```
@@ -418,6 +446,7 @@ Total esperado por ASIN com rating/reviews: ~4 tokens
 Política de token:
 
 ```text
+Status: PREMISSA_OPERACIONAL
 Conta Keepa Pro do grupo:
 saldo inicial operacional: 300 tokens
 renovação: 5 tokens por minuto
@@ -432,6 +461,8 @@ serão preenchidos nessa primeira passagem.
 ```
 
 ### 10.2 Produto com offers como fallback
+
+Status: `DECISAO_INTERNA` para usar offers apenas como fallback controlado; `PENDENTE_SMOKE` para custo real de tokens em execução autenticada.
 
 ```http
 GET https://api.keepa.com/product
@@ -468,6 +499,8 @@ Não assumir multiplicador fixo sem evidência operacional.
 
 ### 10.3 Token status
 
+Status: `OFICIAL` para uso do endpoint /token; `PREMISSA_OPERACIONAL` para valores de saldo e renovação da conta do grupo.
+
 ```http
 GET https://api.keepa.com/token?key=KEEPA_API_KEY
 ```
@@ -483,6 +516,8 @@ Uso:
   `/token`.
 
 ### 10.4 Shape raw de `csv`
+
+Status: `OFICIAL`.
 
 O payload raw de produto da Keepa representa `csv` como array bidimensional indexado por `CsvType`, não como objeto com chaves textuais.
 
@@ -505,6 +540,8 @@ Regras:
 
 ### 10.5 Confirmações oficiais obtidas e pendentes
 
+Status: `OFICIAL` para confirmações obtidas em fontes oficiais; `PENDENTE_PORTAL` para preços de planos Keepa; `PENDENTE_SMOKE` para evidências que dependam de chamada real controlada.
+
 Confirmado no `Product.java` oficial atual da Keepa:
 
 - `reviews.ratingCount` / histórico de rating count não é atualizado desde `April 9th 2025`, porque esse dado foi removido pela Amazon.
@@ -523,6 +560,8 @@ Pendente:
 - Se a página oficial de tracking não estiver acessível estaticamente, registrar `Request.java` como evidência oficial recuperável e marcar a página como não recuperável.
 
 ### 10.6 Smoke obrigatório para `/search` com `asins-only`
+
+Status: `PENDENTE_SMOKE`.
 
 Antes de assumir `/search` com `asins-only` em código produtivo:
 
@@ -814,7 +853,6 @@ export type DecisionStatus =
 
   /amazon
     lwa.ts
-    sigv4.ts
     spapiClient.ts
     competitiveSummary.ts
     fees.ts
@@ -926,7 +964,7 @@ async function processJob(jobId: string, env: Env) {
 ### 17.1 Erros Amazon
 
 - `429`: aplicar exponential backoff e respeitar `x-amzn-RateLimit-Limit` quando disponível.
-- `403`: verificar roles Pricing/Product Listing e credenciais LWA/IAM.
+- `403`: verificar permissões Pricing/Product Listing, autorização da aplicação SP-API e credenciais LWA.
 - `400`: logar payload sanitizado e marcar item como erro.
 - `5xx`: retry com backoff até limite configurado.
 
@@ -1123,7 +1161,7 @@ pnpm wrangler deploy --dry-run
 Regras específicas:
 
 - Testes automatizados não devem chamar Amazon SP-API real nem Keepa real; usar mocks/fakes determinísticos.
-- Clients Amazon devem ter testes de assinatura/payload, batch de até 20, retry/backoff, erro `429`, erro `403`, erro `400` sanitizado e erro `5xx`.
+- Clients Amazon devem ter testes de autorização LWA, payload, batch de até 20, retry/backoff, erro `429`, erro `403`, erro `400` sanitizado e erro `5xx`.
 - Product Fees deve ser tratado e testado como estimativa, não como fee final garantida.
 - Client Keepa deve ter testes para `/token`, cálculo de tokens esperados, `rating=1`, `buybox=1`, `offers` inteiro `20–100`, batch máximo de 20 ASINs com `offers`, ausência de `buybox` quando `offers` estiver presente, saldo insuficiente e reagendamento.
 - Parser Keepa deve ter testes para `csv` raw como `int[][]` indexado por `CsvType`, sem assumir chaves textuais como `AMAZON` ou `SALES` no payload raw.
@@ -1133,7 +1171,7 @@ Regras específicas:
 - Parser de planilha deve ter testes para CSV, XLSX quando implementado, ASIN inválido, custo inválido, duplicidade e limite de 100 ASINs.
 - Cálculos devem ter testes para Pack, custo ajustado, preço validado, divergência de preço, prep fee, net profit e ROI.
 - Exportação deve ter testes para JSON/CSV/XLSX quando implementado.
-- Segurança deve ter testes ou verificações para garantir que `Authorization`, `x-amz-access-token`, `KEEPA_API_KEY`, LWA secrets e AWS secrets não aparecem em logs, mensagens de erro ou payloads persistidos.
+- Segurança deve ter testes ou verificações para garantir que `Authorization`, `x-amz-access-token`, `KEEPA_API_KEY` e segredos LWA não aparecem em logs, mensagens de erro ou payloads persistidos.
 - Migrações D1 devem ser validadas localmente antes de PR quando houver mudança de schema.
 - Qualquer correção de bug deve incluir teste de regressão cobrindo o comportamento corrigido.
 - Se algum comando não puder ser executado, o motivo deve ser registrado no PR e no relatório final da tarefa.
@@ -1177,10 +1215,11 @@ Uma fase só é considerada concluída quando:
 - Implementar fallback `offers=20` sem `buybox`, com batch máximo de 20 ASINs.
 - Implementar SMOKE obrigatório para `/search` com `asins-only` antes de usar busca em produção.
 
-### Fase 4 — Amazon SP-API
+### Fase 4 – Amazon SP-API
 
 - Implementar LWA token refresh.
-- Implementar AWS SigV4.
+- Implementar autenticação Amazon SP-API usando LWA access token.
+- Não implementar SigV4, IAM Role ou AWS credentials.
 - Implementar `getCompetitiveSummary`.
 - Implementar `getMyFeesEstimates`.
 - Adicionar retries e backoff.
@@ -1213,7 +1252,7 @@ Uma fase só é considerada concluída quando:
 ```text
 Build a Cloudflare Workers TypeScript backend and MCP connector for a sourcing analyzer.
 
-Use this SDD as the source of truth.
+Use this SDD as internal project specification. Official documentation and authenticated API behavior override this document when they conflict.
 
 Implement the project in phases:
 1. Project scaffold with Wrangler, D1 schema, Queue and Durable Object bindings.
@@ -1221,7 +1260,7 @@ Implement the project in phases:
 3. Internal Job API with POST /jobs, GET /jobs/:id and GET /jobs/:id/results to support the MCP connector.
 4. CSV input parser with max 100 ASIN validation.
 5. Keepa client for /token and /product with domain=2, stats=90, buybox=1, rating=1, history=0.
-6. Amazon SP-API client with LWA refresh token, SigV4 signing, getCompetitiveSummary and getMyFeesEstimates.
+6. Amazon SP-API client with LWA refresh token, getCompetitiveSummary and getMyFeesEstimates.
 7. Pack detection, price validation, fee estimates, prep fee, net profit and ROI calculation.
 8. CSV result export.
 
@@ -1241,6 +1280,7 @@ Every code implementation or code edit must be committed locally, pushed to the 
 - O agente GPT no chat será a interface operacional; não haverá frontend web próprio nesta fase.
 - Lote máximo inicial: 100 ASINs por job.
 - Amazon SP-API será fonte principal para Buy Box atual e estimativas de fees.
+- Amazon SP-API deve usar apenas LWA access token neste projeto.
 - Keepa será fonte para reviews, rating, BSR, drops, seller/offer count e validação secundária da Buy Box.
 - Keepa principal: `stats=90&buybox=1&rating=1&history=0`.
 - Keepa offers: fallback controlado, não primeira chamada em massa, `offers` inteiro entre `20–100`, batch máximo de 20 ASINs e sem `buybox`.
