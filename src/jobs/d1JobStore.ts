@@ -120,6 +120,26 @@ export async function getD1JobStatus(db: D1Database, jobId: string): Promise<Job
   };
 }
 
+export const getD1JobById = getD1JobStatus;
+
+export async function updateD1JobStatus(
+  db: D1Database,
+  jobId: string,
+  status: JobStatus,
+  expectedStatus: JobStatus,
+): Promise<void> {
+  const now = new Date().toISOString();
+
+  await db
+    .prepare(
+      `UPDATE jobs
+       SET status = ?, updated_at = ?
+       WHERE id = ? AND status = ?`,
+    )
+    .bind(status, now, jobId, expectedStatus)
+    .run();
+}
+
 export async function getD1JobResults(
   db: D1Database,
   jobId: string,
