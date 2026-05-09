@@ -230,6 +230,166 @@ describe('POST /jobs', () => {
 
     expect(response.status).toBe(400);
   });
+
+  it('creates a D1 job from text/csv input and handles quoted titles', async () => {
+    const env = createTestEnv();
+    const csv = [
+      'ASIN,EAN,Title,Cost Price,Sales Price',
+      'b000test05,5012345678901,"Widget, boxed",\u00a310.50,"12,99"',
+      '',
+    ].join('\n');
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv; charset=utf-8' },
+        body: csv,
+      }),
+      env,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body).toMatchObject({
+      status: 'QUEUED',
+      itemCount: 1,
+    });
+    expect(env.DB.jobItems).toMatchObject([
+      {
+        asin: 'B000TEST05',
+        ean: '5012345678901',
+        supplier_title: 'Widget, boxed',
+        supplier_cost: 10.5,
+        spreadsheet_sales_price: 12.99,
+      },
+    ]);
+  });
+
+  it('creates a D1 job from an explicit csv JSON payload', async () => {
+    const env = createTestEnv();
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          csv: ['ASIN,Description,Cost Price', 'b000test06,From JSON csv,9.25'].join('\n'),
+        }),
+      }),
+      env,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body).toMatchObject({
+      status: 'QUEUED',
+      itemCount: 1,
+    });
+    expect(env.DB.jobItems).toMatchObject([
+      {
+        asin: 'B000TEST06',
+        supplier_title: 'From JSON csv',
+        supplier_cost: 9.25,
+      },
+    ]);
+  });
+
+  it('returns a controlled error for malformed CSV', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: 'ASIN,Cost Price\n"B000TEST07,10',
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'validation_error',
+        message: 'Invalid request payload',
+      },
+    });
+  });
+
+  it('rejects CSV rows with invalid cost values', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: 'ASIN,Cost Price\nB000TEST08,not-a-price',
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'validation_error',
+        message: 'Invalid request payload',
+      },
+    });
+  });
+
+  it('rejects CSV rows without ASIN', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: 'ASIN,Cost Price\n,10.00',
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it('rejects CSV batches with more than 100 items', async () => {
+    const rows = Array.from({ length: 101 }, (_, index) => {
+      const suffix = String(index).padStart(7, '0');
+      return `B${suffix}01,10`;
+    });
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: ['ASIN,Cost Price', ...rows].join('\n'),
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(400);
+  });
+
+  it('removes identical ASIN EAN and cost duplicates while keeping different costs', async () => {
+    const env = createTestEnv();
+    const csv = [
+      'ASIN,EAN,Title,Cost Price',
+      'b000test09,5012345678909,First,\u00a310.00',
+      'B000TEST09,5012345678909,Duplicate,10',
+      'B000TEST09,5012345678909,Different cost,11',
+    ].join('\n');
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'text/csv' },
+        body: csv,
+      }),
+      env,
+    );
+    const body = await response.json();
+
+    expect(response.status).toBe(201);
+    expect(body).toMatchObject({
+      itemCount: 2,
+    });
+    expect(env.DB.jobItems.map((item) => item.supplier_title)).toEqual([
+      'First',
+      'Different cost',
+    ]);
+  });
 });
 
 describe('GET /jobs/:jobId', () => {
