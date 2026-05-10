@@ -2,9 +2,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { logger, sanitizeLogPayload } from './logger';
 
 describe('sanitizeLogPayload', () => {
-  it('redacts secrets from Error message and stack while preserving fields', () => {
+  it('redacts secrets from Error messages without logging stack by default', () => {
     const error = new Error(
-      'Amazon failed with Authorization: Bearer fake-access-token and KEEPA_API_KEY=fake-keepa-key',
+      [
+        'Amazon failed with Authorization: Bearer fake-access-token',
+        'x-amz-access-token: fake-amz-access-token',
+        'KEEPA_API_KEY=fake-keepa-key',
+        'AMAZON_REFRESH_TOKEN=refresh-token',
+        'AMAZON_LWA_CLIENT_SECRET=lwa-secret',
+      ].join(' and '),
     );
     error.stack =
       'Error: token=stack-token\n    at request with AMAZON_REFRESH_TOKEN=refresh-token';
@@ -12,8 +18,7 @@ describe('sanitizeLogPayload', () => {
     expect(sanitizeLogPayload(error)).toEqual({
       name: 'Error',
       message:
-        'Amazon failed with Authorization: Bearer [REDACTED] and KEEPA_API_KEY=[REDACTED]',
-      stack: 'Error: token=[REDACTED]\n    at request with AMAZON_REFRESH_TOKEN=[REDACTED]',
+        'Amazon failed with Authorization: Bearer [REDACTED] and x-amz-access-token: [REDACTED] and KEEPA_API_KEY=[REDACTED] and AMAZON_REFRESH_TOKEN=[REDACTED] and AMAZON_LWA_CLIENT_SECRET=[REDACTED]',
     });
   });
 
@@ -51,10 +56,10 @@ describe('sanitizeLogPayload', () => {
         message: 'token expired',
       },
     });
-    expect(sanitized).toHaveProperty('stack');
+    expect(sanitized).not.toHaveProperty('stack');
   });
 
-  it('preserves Error fields inside structured payloads', () => {
+  it('preserves safe Error fields inside structured payloads without stack', () => {
     const error = new Error('request failed');
     error.stack = 'Error: request failed\n    at test';
 
@@ -67,7 +72,6 @@ describe('sanitizeLogPayload', () => {
       error: {
         name: 'Error',
         message: 'request failed',
-        stack: 'Error: request failed\n    at test',
       },
       Authorization: '[REDACTED]',
     });

@@ -11,7 +11,17 @@ import type { CreateJobRequest } from '../jobs/types';
 import { enqueueJob } from '../jobs/jobQueue';
 import type { JobQueueMessage } from '../jobs/jobQueue';
 import { jsonError, jsonResponse, validationError } from '../utils/http';
-import { logger } from '../utils/logger';
+import {
+  emitLogEvent,
+  emitMetric,
+  getErrorCode,
+  getErrorMessage,
+  sanitizeError,
+} from '../utils/observability';
+
+export type RequestContext = {
+  traceId?: string;
+};
 
 async function parseJson(request: Request): Promise<unknown> {
   try {
@@ -59,17 +69,45 @@ export async function handleCreateJob(
   request: Request,
   db: D1Database,
   queue: Queue<JobQueueMessage>,
+  context: RequestContext = {},
 ): Promise<Response> {
   try {
     const createJobRequest = await parseCreateJobRequest(request);
     const response = await createD1Job(db, createJobRequest);
+    emitLogEvent('job_created', {
+      stage: 'job_create',
+      traceId: context.traceId,
+      jobId: response.jobId,
+      status: response.status,
+      itemCount: response.itemCount,
+    });
+    emitMetric({
+      name: 'jobs_created',
+      value: 1,
+      dimensions: { route: 'POST /jobs' },
+      traceId: context.traceId,
+      jobId: response.jobId,
+    });
 
     try {
       await enqueueJob(queue, response.jobId);
     } catch (error) {
-      logger.error('Job enqueue failed after persistence', {
+      emitLogEvent('job_enqueue_failed', {
+        stage: 'job_create',
+        traceId: context.traceId,
         jobId: response.jobId,
-        error,
+        status: response.status,
+        itemCount: response.itemCount,
+        errorCode: 'job_enqueue_failed',
+        errorMessage: getErrorMessage(error, 'Job enqueue failed'),
+        error: sanitizeError(error),
+      }, 'error');
+      emitMetric({
+        name: 'job_enqueue_failed',
+        value: 1,
+        dimensions: { route: 'POST /jobs' },
+        traceId: context.traceId,
+        jobId: response.jobId,
       });
       return jsonError(
         'job_enqueue_failed',
@@ -89,13 +127,23 @@ export async function handleCreateJob(
       return validationError(error.issues);
     }
 
-    logger.error('Job creation failed', { error });
+    emitLogEvent('http_request_failed', {
+      stage: 'job_create',
+      traceId: context.traceId,
+      errorCode: getErrorCode(error),
+      errorMessage: getErrorMessage(error),
+      error: sanitizeError(error),
+    }, 'error');
 
     return jsonError('internal_error', 'Unexpected error', 500);
   }
 }
 
-export async function handleGetJobStatus(jobId: string, db: D1Database): Promise<Response> {
+export async function handleGetJobStatus(
+  jobId: string,
+  db: D1Database,
+  context: RequestContext = {},
+): Promise<Response> {
   try {
     const response = await getD1JobStatus(db, jobId);
 
@@ -104,12 +152,24 @@ export async function handleGetJobStatus(jobId: string, db: D1Database): Promise
     }
 
     return jsonResponse(response);
-  } catch {
+  } catch (error) {
+    emitLogEvent('http_request_failed', {
+      stage: 'job_status',
+      traceId: context.traceId,
+      jobId,
+      errorCode: getErrorCode(error),
+      errorMessage: getErrorMessage(error),
+      error: sanitizeError(error),
+    }, 'error');
     return jsonError('internal_error', 'Unexpected error', 500);
   }
 }
 
-export async function handleGetJobResults(jobId: string, db: D1Database): Promise<Response> {
+export async function handleGetJobResults(
+  jobId: string,
+  db: D1Database,
+  context: RequestContext = {},
+): Promise<Response> {
   try {
     const response = await getD1JobResults(db, jobId);
 
@@ -118,7 +178,15 @@ export async function handleGetJobResults(jobId: string, db: D1Database): Promis
     }
 
     return jsonResponse(response);
-  } catch {
+  } catch (error) {
+    emitLogEvent('http_request_failed', {
+      stage: 'job_results',
+      traceId: context.traceId,
+      jobId,
+      errorCode: getErrorCode(error),
+      errorMessage: getErrorMessage(error),
+      error: sanitizeError(error),
+    }, 'error');
     return jsonError('internal_error', 'Unexpected error', 500);
   }
 }

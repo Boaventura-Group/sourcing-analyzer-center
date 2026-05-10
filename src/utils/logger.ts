@@ -2,15 +2,17 @@ type LogPayload = Record<string, unknown>;
 type LogMethod = (message: string, payload?: LogPayload) => void;
 
 const SECRET_FIELD_PATTERN = /(authorization|x-amz-access-token|api[_-]?key|secret|token|credential|password)/i;
+const NON_LOGGABLE_PAYLOAD_FIELD_PATTERN = /^(body|payload|csv|items|results|raw.*)$/i;
 const REDACTED = '[REDACTED]';
 const CIRCULAR = '[Circular]';
 
 function redactSecretsInString(value: string): string {
   return value
     .replace(/Authorization\s*:\s*Bearer\s+[^\s,;]+/gi, `Authorization: Bearer ${REDACTED}`)
+    .replace(/x-amz-access-token\s*:\s*[^\s,;]+/gi, `x-amz-access-token: ${REDACTED}`)
     .replace(/\bBearer\s+[^\s,;]+/gi, `Bearer ${REDACTED}`)
     .replace(
-      /\b(KEEPA_API_KEY|AMAZON_REFRESH_TOKEN|api[_-]?key|token|secret)\s*=\s*[^\s,;&]+/gi,
+      /\b(KEEPA_API_KEY|AMAZON_REFRESH_TOKEN|AMAZON_LWA_CLIENT_SECRET|api[_-]?key|token|secret)\s*=\s*[^\s,;&]+/gi,
       (_match, key: string) => `${key}=${REDACTED}`,
     );
 }
@@ -36,10 +38,6 @@ export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>())
       message: redactSecretsInString(value.message),
     };
 
-    if (value.stack) {
-      sanitizedError.stack = redactSecretsInString(value.stack);
-    }
-
     if (value.cause !== undefined) {
       sanitizedError.cause = sanitizeLogPayload(value.cause, seen);
     }
@@ -57,7 +55,9 @@ export function sanitizeLogPayload(value: unknown, seen = new WeakSet<object>())
   const sanitizedObject = Object.fromEntries(
     Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
       key,
-      SECRET_FIELD_PATTERN.test(key) ? REDACTED : sanitizeLogPayload(entry, seen),
+      SECRET_FIELD_PATTERN.test(key) || NON_LOGGABLE_PAYLOAD_FIELD_PATTERN.test(key)
+        ? REDACTED
+        : sanitizeLogPayload(entry, seen),
     ]),
   );
 

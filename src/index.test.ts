@@ -28,7 +28,7 @@ type JobItemRecord = {
 
 type ItemResultRecord = Record<string, unknown>;
 
-type RunResult = { success: true };
+type RunResult = { success: true; meta: { changes: number } };
 type QueueSendOptions = Parameters<Queue<JobQueueMessage>['send']>[1];
 
 class FakeQueue {
@@ -59,8 +59,9 @@ class FakePreparedStatement {
   }
 
   async run(): Promise<RunResult> {
+    this.db.lastRunChanges = 1;
     this.db.executeRun(this.sql, this.values);
-    return { success: true };
+    return { success: true, meta: { changes: this.db.lastRunChanges } };
   }
 
   async first<T>(): Promise<T | null> {
@@ -78,6 +79,8 @@ class FakeD1Database {
   readonly itemResults: ItemResultRecord[] = [];
   failNextAll = false;
   failNextFirst = false;
+  forceNextCompleteJobNoop = false;
+  lastRunChanges = 1;
 
   prepare(sql: string): FakePreparedStatement {
     return new FakePreparedStatement(this, sql);
@@ -308,11 +311,20 @@ class FakeD1Database {
         (item) => item.job_id === jobId && !['COMPLETED', 'FAILED'].includes(item.status),
       );
 
+      if (this.forceNextCompleteJobNoop) {
+        this.forceNextCompleteJobNoop = false;
+        this.lastRunChanges = 0;
+        return;
+      }
+
       if (job && job.status === 'PROCESSING' && !hasOpenItems) {
         job.status = 'COMPLETED';
         job.updated_at = String(updatedAt);
+        this.lastRunChanges = 1;
+        return;
       }
 
+      this.lastRunChanges = 0;
       return;
     }
 
@@ -363,6 +375,27 @@ function createTestEnv(): Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue } {
   const db = new FakeD1Database();
   const jobQueue = new FakeQueue();
   return { DB: db, JOB_QUEUE: jobQueue } as Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue };
+}
+
+type ConsoleMethod = 'info' | 'warn' | 'error';
+type StructuredLogPayload = Record<string, unknown>;
+
+function getStructuredLogPayloads(
+  method: ConsoleMethod,
+  event?: string,
+): StructuredLogPayload[] {
+  return vi
+    .mocked(console[method])
+    .mock.calls.map((call) => call[1])
+    .filter(
+      (payload): payload is StructuredLogPayload =>
+        typeof payload === 'object' && payload !== null,
+    )
+    .filter((payload) => event === undefined || payload.event === event);
+}
+
+function getMetricNames(): unknown[] {
+  return getStructuredLogPayloads('info', 'metric_event').map((payload) => payload.metricName);
 }
 
 beforeEach(() => {
@@ -425,6 +458,52 @@ describe('POST /jobs', () => {
     });
   });
 
+  it('emits correlated HTTP and job_created structured logs', async () => {
+    const env = createTestEnv();
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        headers: { 'cf-ray': 'ray-create-job' },
+        body: JSON.stringify({
+          items: [{ asin: 'b000test12', supplierCost: 10 }],
+        }),
+      }),
+      env,
+    );
+    const body = (await response.json()) as { jobId: string };
+
+    expect(response.status).toBe(201);
+    expect(getStructuredLogPayloads('info', 'http_request_started')).toContainEqual(
+      expect.objectContaining({
+        event: 'http_request_started',
+        stage: 'http',
+        traceId: 'ray-create-job',
+        method: 'POST',
+        path: '/jobs',
+      }),
+    );
+    expect(getStructuredLogPayloads('info', 'job_created')).toContainEqual(
+      expect.objectContaining({
+        event: 'job_created',
+        stage: 'job_create',
+        traceId: 'ray-create-job',
+        jobId: body.jobId,
+        status: 'QUEUED',
+        itemCount: 1,
+      }),
+    );
+    expect(getStructuredLogPayloads('info', 'http_request_completed')).toContainEqual(
+      expect.objectContaining({
+        event: 'http_request_completed',
+        stage: 'http',
+        traceId: 'ray-create-job',
+        status: 201,
+        durationMs: expect.any(Number),
+      }),
+    );
+    expect(getMetricNames()).toContain('jobs_created');
+  });
+
   it('returns a controlled error when enqueue fails after D1 persistence', async () => {
     const env = createTestEnv();
     env.JOB_QUEUE.failNextSend = true;
@@ -454,6 +533,22 @@ describe('POST /jobs', () => {
     });
     expect(env.DB.jobs.size).toBe(1);
     expect(env.JOB_QUEUE.sentMessages).toHaveLength(0);
+
+    const errorLogs = getStructuredLogPayloads('error', 'job_enqueue_failed');
+    const serializedErrorLogs = JSON.stringify(errorLogs);
+    expect(errorLogs).toContainEqual(
+      expect.objectContaining({
+        event: 'job_enqueue_failed',
+        stage: 'job_create',
+        jobId: createdJobId,
+        status: 'QUEUED',
+        itemCount: 1,
+        errorCode: 'job_enqueue_failed',
+      }),
+    );
+    expect(serializedErrorLogs).not.toContain('SECRET');
+    expect(serializedErrorLogs).not.toContain('token=SECRET');
+    expect(getMetricNames()).toContain('job_enqueue_failed');
   });
 
   it('returns standardized validation errors for invalid payloads', async () => {
@@ -795,6 +890,21 @@ describe('queue consumer', () => {
     } as unknown as MessageBatch<unknown>;
   }
 
+  function queueMessage(jobId: string): JobQueueMessage {
+    return {
+      jobId,
+      timestamp: new Date().toISOString(),
+      schemaVersion: 1,
+    };
+  }
+
+  function createBatchItems(count: number): Array<{ asin: string; supplierCost: number }> {
+    return Array.from({ length: count }, (_, index) => ({
+      asin: `B${String(index + 1).padStart(9, '0')}`,
+      supplierCost: 1,
+    }));
+  }
+
   it('worker queue handler processes queued job messages', async () => {
     const env = createTestEnv();
     env.DB.jobs.set('job_worker_queue', {
@@ -858,6 +968,14 @@ describe('queue consumer', () => {
       expect(ack).toHaveBeenCalledTimes(1);
       expect(retry).not.toHaveBeenCalled();
       expect(env.DB.jobs.size).toBe(0);
+      expect(getStructuredLogPayloads('warn', 'job_processing_ignored')).toContainEqual(
+        expect.objectContaining({
+          event: 'job_processing_ignored',
+          stage: 'queue',
+          reason: 'malformed_message',
+        }),
+      );
+      expect(getMetricNames()).toContain('jobs_ignored');
     },
   );
 
@@ -871,6 +989,15 @@ describe('queue consumer', () => {
         schemaVersion: 1,
       }),
     ).resolves.toEqual({ action: 'ignored_missing_job' });
+    expect(getStructuredLogPayloads('info', 'job_processing_ignored')).toContainEqual(
+      expect.objectContaining({
+        event: 'job_processing_ignored',
+        stage: 'job_processing',
+        jobId: 'job_missing',
+        reason: 'missing_job',
+      }),
+    );
+    expect(getMetricNames()).toContain('jobs_ignored');
   });
 
   it('resumes jobs already in PROCESSING so queue retries can finish partial work', async () => {
@@ -904,6 +1031,38 @@ describe('queue consumer', () => {
       }),
     ).resolves.toEqual({ action: 'processed', processedItems: 1, failedItems: 0 });
     expect(env.DB.jobs.get('job_existing')?.status).toBe('COMPLETED');
+  });
+
+  it('logs structural D1 failures as retryable queue errors and rethrows', async () => {
+    const env = createTestEnv();
+    env.DB.jobs.set('job_retryable_error', {
+      id: 'job_retryable_error',
+      status: 'QUEUED',
+      total_items: 1,
+      processed_items: 0,
+      profitable_items: 0,
+      error_items: 0,
+    });
+    env.DB.failNextAll = true;
+
+    await expect(processJobQueueMessage(env.DB, queueMessage('job_retryable_error'))).rejects.toThrow(
+      'D1 all failed',
+    );
+
+    const errorLogs = getStructuredLogPayloads('error', 'job_processing_retryable_error');
+    const serialized = JSON.stringify(errorLogs);
+    expect(errorLogs).toContainEqual(
+      expect.objectContaining({
+        event: 'job_processing_retryable_error',
+        stage: 'job_processing',
+        jobId: 'job_retryable_error',
+        schemaVersion: 1,
+        errorCode: 'Error',
+      }),
+    );
+    expect(serialized).not.toContain('token=SECRET');
+    expect(serialized).not.toContain('SECRET');
+    expect(getMetricNames()).toContain('queue_messages_retryable_error');
   });
 
   it.each(['COMPLETED', 'FAILED'] as const)(
@@ -996,6 +1155,122 @@ describe('queue consumer', () => {
     expect(resultsBody.results).toHaveLength(3);
   });
 
+  it.each([5, 20, 100])(
+    'processes a local batch of %s ASINs to completion without duplicate results',
+    async (itemCount) => {
+      const env = createTestEnv();
+      const createResponse = await worker.fetch(
+        new Request('https://example.test/jobs', {
+          method: 'POST',
+          body: JSON.stringify({
+            items: createBatchItems(itemCount),
+          }),
+        }),
+        env,
+      );
+      const created = (await createResponse.json()) as { jobId: string };
+
+      await expect(processJobQueueMessage(env.DB, queueMessage(created.jobId))).resolves.toEqual({
+        action: 'processed',
+        processedItems: itemCount,
+        failedItems: 0,
+      });
+
+      expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+        status: 'COMPLETED',
+        processed_items: itemCount,
+        profitable_items: itemCount,
+        error_items: 0,
+      });
+      expect(env.DB.itemResults).toHaveLength(itemCount);
+      expect(new Set(env.DB.itemResults.map((result) => result.job_item_id)).size).toBe(
+        itemCount,
+      );
+    },
+  );
+
+  it('emits structured processing events and metric logs without raw payloads or secrets', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 },
+            { asin: 'B000NEG001', supplierCost: 12, spreadsheetSalesPrice: 10 },
+            { asin: 'B0000ERROR', supplierCost: 5 },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+
+    await processJobQueueMessage(env.DB, queueMessage(created.jobId));
+
+    expect(getStructuredLogPayloads('info', 'job_processing_started')).toContainEqual(
+      expect.objectContaining({
+        event: 'job_processing_started',
+        stage: 'job_processing',
+        jobId: created.jobId,
+        status: 'PROCESSING',
+        schemaVersion: 1,
+      }),
+    );
+    expect(getStructuredLogPayloads('info', 'job_item_processed')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          event: 'job_item_processed',
+          stage: 'job_processing',
+          asin: 'B000PROFIT',
+          status: 'PROFIT_POSITIVE',
+        }),
+        expect.objectContaining({
+          event: 'job_item_processed',
+          stage: 'job_processing',
+          asin: 'B000NEG001',
+          status: 'NOT_PROFITABLE',
+        }),
+      ]),
+    );
+    expect(getStructuredLogPayloads('warn', 'job_item_failed')).toContainEqual(
+      expect.objectContaining({
+        event: 'job_item_failed',
+        stage: 'job_processing',
+        asin: 'B0000ERROR',
+        errorCode: 'FakeSourcingDataError',
+        errorMessage: 'Controlled fake sourcing data failure',
+      }),
+    );
+    expect(getStructuredLogPayloads('info', 'job_processing_completed')).toContainEqual(
+      expect.objectContaining({
+        event: 'job_processing_completed',
+        stage: 'job_processing',
+        jobId: created.jobId,
+        processedItems: 3,
+        profitableItems: 1,
+        errorItems: 1,
+        durationMs: expect.any(Number),
+      }),
+    );
+    expect(getMetricNames()).toEqual(
+      expect.arrayContaining([
+        'items_processed',
+        'items_failed',
+        'items_profitable',
+        'jobs_completed',
+        'queue_messages_processed',
+        'processing_duration_ms',
+      ]),
+    );
+    expect(JSON.stringify([...getStructuredLogPayloads('info'), ...getStructuredLogPayloads('warn')])).not.toContain(
+      'raw_',
+    );
+    expect(JSON.stringify([...getStructuredLogPayloads('info'), ...getStructuredLogPayloads('warn')])).not.toContain(
+      'SECRET',
+    );
+  });
+
   it('marks item-specific fake errors without retrying the whole message', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
@@ -1068,6 +1343,37 @@ describe('queue consumer', () => {
       profitable_items: 1,
       error_items: 0,
     });
+    expect(getMetricNames().filter((name) => name === 'jobs_completed')).toHaveLength(1);
+    expect(getStructuredLogPayloads('info', 'job_processing_completed')).toHaveLength(1);
+  });
+
+  it('does not emit job completion when completeJobIfDone is a no-op', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 }],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+    env.DB.forceNextCompleteJobNoop = true;
+
+    await expect(processJobQueueMessage(env.DB, queueMessage(created.jobId))).resolves.toEqual({
+      action: 'processed',
+      processedItems: 1,
+      failedItems: 0,
+    });
+
+    expect(env.DB.itemResults).toHaveLength(1);
+    expect(new Set(env.DB.itemResults.map((result) => result.job_item_id)).size).toBe(1);
+    expect(getMetricNames()).toEqual(
+      expect.arrayContaining(['queue_messages_processed', 'processing_duration_ms']),
+    );
+    expect(getMetricNames().filter((name) => name === 'jobs_completed')).toHaveLength(0);
+    expect(getStructuredLogPayloads('info', 'job_processing_completed')).toHaveLength(0);
   });
 
   it('persists skipped results when fake data has no Buy Box', async () => {
@@ -1102,6 +1408,55 @@ describe('queue consumer', () => {
       decision_status: 'SKIPPED_NO_BUYBOX',
       validated_sales_price: null,
     });
+  });
+
+  it('emits review and insufficient-data metrics for mismatch, no Buy Box, and no fees', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { asin: 'B000MISM02', supplierCost: 1 },
+            { asin: 'B00000NOBB', supplierCost: 5, spreadsheetSalesPrice: 9 },
+            { asin: 'B000NOFEES', supplierCost: 5, spreadsheetSalesPrice: 15 },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+
+    await processJobQueueMessage(env.DB, queueMessage(created.jobId));
+
+    expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 3,
+      error_items: 0,
+    });
+    expect(env.DB.itemResults).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          asin: 'B000MISM02',
+          price_status: 'BUYBOX_MISMATCH_REVIEW',
+        }),
+        expect.objectContaining({
+          asin: 'B00000NOBB',
+          decision_status: 'SKIPPED_NO_BUYBOX',
+        }),
+        expect.objectContaining({
+          asin: 'B000NOFEES',
+          decision_status: 'SKIPPED_NO_FEES',
+        }),
+      ]),
+    );
+    expect(getMetricNames()).toEqual(
+      expect.arrayContaining([
+        'price_mismatch_review_count',
+        'no_buybox_count',
+        'missing_fees_count',
+      ]),
+    );
   });
 });
 

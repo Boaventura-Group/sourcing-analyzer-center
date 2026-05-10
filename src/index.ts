@@ -4,7 +4,15 @@ import { jsonError } from './utils/http';
 import { processJobQueueMessage } from './jobs/processJob';
 import { parseJobQueueMessage } from './jobs/jobQueue';
 import type { JobQueueMessage } from './jobs/jobQueue';
-import { logger } from './utils/logger';
+import {
+  durationMsSince,
+  emitLogEvent,
+  emitMetric,
+  getErrorCode,
+  getErrorMessage,
+  getRequestTraceId,
+  sanitizeError,
+} from './utils/observability';
 
 export type Env = {
   DB: D1Database;
@@ -13,14 +21,103 @@ export type Env = {
 
 export default {
   async fetch(request, env): Promise<Response> {
+    const startedAtMs = Date.now();
     const url = new URL(request.url);
+    const traceId = getRequestTraceId(request);
 
+    emitLogEvent('http_request_started', {
+      stage: 'http',
+      traceId,
+      method: request.method,
+      path: url.pathname,
+    });
+
+    try {
+      const response = await routeRequest(request, env, url, traceId);
+      const durationMs = durationMsSince(startedAtMs);
+
+      if (response.status >= 500) {
+        emitLogEvent('http_request_failed', {
+          stage: 'http',
+          traceId,
+          method: request.method,
+          path: url.pathname,
+          status: response.status,
+          durationMs,
+          errorCode: `HTTP_${response.status}`,
+          errorMessage: 'HTTP request failed',
+        }, 'error');
+      }
+
+      emitLogEvent('http_request_completed', {
+        stage: 'http',
+        traceId,
+        method: request.method,
+        path: url.pathname,
+        status: response.status,
+        durationMs,
+      });
+
+      return response;
+    } catch (error) {
+      emitLogEvent('http_request_failed', {
+        stage: 'http',
+        traceId,
+        method: request.method,
+        path: url.pathname,
+        status: 500,
+        durationMs: durationMsSince(startedAtMs),
+        errorCode: getErrorCode(error),
+        errorMessage: getErrorMessage(error),
+        error: sanitizeError(error),
+      }, 'error');
+
+      return jsonError('internal_error', 'Unexpected error', 500);
+    }
+  },
+
+  async queue(batch, env): Promise<void> {
+    for (const message of batch.messages) {
+      const body = parseJobQueueMessage(message.body);
+
+      if (!body) {
+        // Malformed queue bodies are poison messages, so discard them with ack.
+        emitLogEvent('job_processing_ignored', {
+          stage: 'queue',
+          reason: 'malformed_message',
+          bodyType: typeof message.body,
+        }, 'warn');
+        emitMetric({
+          name: 'jobs_ignored',
+          value: 1,
+          dimensions: { reason: 'malformed_message' },
+        });
+        message.ack();
+        continue;
+      }
+
+      try {
+        await processJobQueueMessage(env.DB, body);
+        message.ack();
+      } catch {
+        message.retry();
+      }
+    }
+  },
+} satisfies ExportedHandler<Env>;
+
+async function routeRequest(
+  request: Request,
+  env: Env,
+  url: URL,
+  traceId: string,
+): Promise<Response> {
     if (request.method === 'GET' && url.pathname === '/health') {
       return handleHealthCheck();
     }
 
     if (request.method === 'POST' && url.pathname === '/jobs') {
-      return handleCreateJob(request, env.DB, env.JOB_QUEUE);
+      return handleCreateJob(request, env.DB, env.JOB_QUEUE, { traceId });
     }
 
     const jobPathMatch = /^\/jobs\/([^/]+)(?:\/(results))?$/.exec(url.pathname);
@@ -30,41 +127,13 @@ export default {
       const subResource = jobPathMatch[2];
 
       if (request.method === 'GET' && subResource === undefined) {
-        return handleGetJobStatus(jobId, env.DB);
+        return handleGetJobStatus(jobId, env.DB, { traceId });
       }
 
       if (request.method === 'GET' && subResource === 'results') {
-        return handleGetJobResults(jobId, env.DB);
+        return handleGetJobResults(jobId, env.DB, { traceId });
       }
     }
 
     return jsonError('not_found', 'Route not found', 404);
-  },
-
-  async queue(batch, env): Promise<void> {
-    for (const message of batch.messages) {
-      const body = parseJobQueueMessage(message.body);
-
-      if (!body) {
-        // Malformed queue bodies are poison messages, so discard them with ack.
-        logger.warn('Malformed job queue message discarded', {
-          bodyType: typeof message.body,
-        });
-        message.ack();
-        continue;
-      }
-
-      try {
-        await processJobQueueMessage(env.DB, body);
-        message.ack();
-      } catch (error) {
-        logger.error('Job queue message processing failed', {
-          jobId: body.jobId,
-          schemaVersion: body.schemaVersion,
-          error,
-        });
-        message.retry();
-      }
-    }
-  },
-} satisfies ExportedHandler<Env>;
+}

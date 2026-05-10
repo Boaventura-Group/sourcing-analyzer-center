@@ -422,10 +422,10 @@ export async function refreshJobCounters(db: D1Database, jobId: string): Promise
     .run();
 }
 
-export async function completeJobIfDone(db: D1Database, jobId: string): Promise<void> {
+export async function completeJobIfDone(db: D1Database, jobId: string): Promise<boolean> {
   const now = new Date().toISOString();
 
-  await db
+  const result = await db
     .prepare(
       `UPDATE jobs
        SET status = 'COMPLETED', updated_at = ?
@@ -440,6 +440,8 @@ export async function completeJobIfDone(db: D1Database, jobId: string): Promise<
     )
     .bind(now, jobId, jobId)
     .run();
+
+  return result.meta.changes > 0;
 }
 
 export async function getD1JobResults(
