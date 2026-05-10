@@ -8,7 +8,10 @@ import { parseCsvCreateJobRequest } from '../input/parseCsv';
 import { SupplierInputValidationError } from '../input/normalizeSupplierItems';
 import { createJobRequestSchema } from '../jobs/types';
 import type { CreateJobRequest } from '../jobs/types';
+import { enqueueJob } from '../jobs/jobQueue';
+import type { JobQueueMessage } from '../jobs/jobQueue';
 import { jsonError, jsonResponse, validationError } from '../utils/http';
+import { logger } from '../utils/logger';
 
 async function parseJson(request: Request): Promise<unknown> {
   try {
@@ -52,10 +55,29 @@ async function parseCreateJobRequest(request: Request): Promise<CreateJobRequest
   return createJobRequestSchema.parse(payload);
 }
 
-export async function handleCreateJob(request: Request, db: D1Database): Promise<Response> {
+export async function handleCreateJob(
+  request: Request,
+  db: D1Database,
+  queue: Queue<JobQueueMessage>,
+): Promise<Response> {
   try {
     const createJobRequest = await parseCreateJobRequest(request);
     const response = await createD1Job(db, createJobRequest);
+
+    try {
+      await enqueueJob(queue, response.jobId);
+    } catch (error) {
+      logger.error('Job enqueue failed after persistence', {
+        jobId: response.jobId,
+        error,
+      });
+      return jsonError(
+        'job_enqueue_failed',
+        'Job was created but could not be queued for processing',
+        503,
+        response,
+      );
+    }
 
     return jsonResponse(response, 201);
   } catch (error) {
@@ -66,6 +88,8 @@ export async function handleCreateJob(request: Request, db: D1Database): Promise
     if (error instanceof SupplierInputValidationError) {
       return validationError(error.issues);
     }
+
+    logger.error('Job creation failed', { error });
 
     return jsonError('internal_error', 'Unexpected error', 500);
   }

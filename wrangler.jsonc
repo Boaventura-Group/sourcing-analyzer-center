@@ -13,5 +13,22 @@
       "database_id": "329f1144-584d-4e1a-aff4-2ad4603c1335",
       "migrations_dir": "migrations"
     }
-  ]
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOB_QUEUE",
+        "queue": "sourcing-analyzer-jobs"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "sourcing-analyzer-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "sourcing-analyzer-jobs-dlq"
+      }
+    ]
+  }
 }

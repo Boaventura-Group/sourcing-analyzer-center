@@ -1,10 +1,13 @@
 import worker from './index';
 import type { Env } from './index';
+import { processJobQueueMessage } from './jobs/processJob';
+import type { JobQueueMessage } from './jobs/jobQueue';
 
 type JobRecord = {
   id: string;
   status: string;
   total_items: number;
+  updated_at?: string;
 };
 
 type JobItemRecord = {
@@ -22,6 +25,21 @@ type JobItemRecord = {
 type ItemResultRecord = Record<string, unknown>;
 
 type RunResult = { success: true };
+type QueueSendOptions = Parameters<Queue<JobQueueMessage>['send']>[1];
+
+class FakeQueue {
+  readonly sentMessages: Array<{ body: JobQueueMessage; options?: QueueSendOptions }> = [];
+  failNextSend = false;
+
+  async send(body: JobQueueMessage, options?: QueueSendOptions): Promise<void> {
+    if (this.failNextSend) {
+      this.failNextSend = false;
+      throw new Error('Queue send failed with token=SECRET');
+    }
+
+    this.sentMessages.push({ body, options });
+  }
+}
 
 class FakePreparedStatement {
   private values: unknown[] = [];
@@ -111,6 +129,18 @@ class FakeD1Database {
       return;
     }
 
+    if (normalizedSql.startsWith('UPDATE jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?')) {
+      const [status, updatedAt, jobId, expectedStatus] = values;
+      const job = this.jobs.get(String(jobId));
+
+      if (job && job.status === String(expectedStatus)) {
+        job.status = String(status);
+        job.updated_at = String(updatedAt);
+      }
+
+      return;
+    }
+
     throw new Error(`Unsupported fake D1 run SQL: ${normalizedSql}`);
   }
 
@@ -147,10 +177,21 @@ class FakeD1Database {
   }
 }
 
-function createTestEnv(): Env & { DB: FakeD1Database } {
+function createTestEnv(): Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue } {
   const db = new FakeD1Database();
-  return { DB: db } as Env & { DB: FakeD1Database };
+  const jobQueue = new FakeQueue();
+  return { DB: db, JOB_QUEUE: jobQueue } as Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue };
 }
+
+beforeEach(() => {
+  vi.spyOn(console, 'info').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('GET /health', () => {
   it('returns a simple ok JSON response', async () => {
@@ -194,6 +235,43 @@ describe('POST /jobs', () => {
         status: 'CREATED',
       },
     ]);
+    expect(env.JOB_QUEUE.sentMessages).toHaveLength(1);
+    expect(env.JOB_QUEUE.sentMessages[0]?.body).toEqual({
+      jobId: (body as { jobId: string }).jobId,
+      timestamp: expect.any(String),
+      schemaVersion: 1,
+    });
+  });
+
+  it('returns a controlled error when enqueue fails after D1 persistence', async () => {
+    const env = createTestEnv();
+    env.JOB_QUEUE.failNextSend = true;
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'b000test11', supplierCost: 10 }],
+        }),
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(503);
+    const createdJobId = Array.from(env.DB.jobs.keys())[0];
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'job_enqueue_failed',
+        message: 'Job was created but could not be queued for processing',
+        details: {
+          jobId: createdJobId,
+          status: 'QUEUED',
+          itemCount: 1,
+        },
+      },
+    });
+    expect(env.DB.jobs.size).toBe(1);
+    expect(env.JOB_QUEUE.sentMessages).toHaveLength(0);
   });
 
   it('returns standardized validation errors for invalid payloads', async () => {
@@ -512,6 +590,123 @@ describe('GET /jobs/:jobId', () => {
         message: 'Unexpected error',
       },
     });
+  });
+});
+
+describe('queue consumer', () => {
+  function queueBatchForBody(
+    body: unknown,
+    controls: { ack: () => void; retry: () => void },
+  ): MessageBatch<unknown> {
+    return {
+      queue: 'sourcing-analyzer-jobs',
+      metadata: {},
+      messages: [
+        {
+          body,
+          ack: controls.ack,
+          retry: controls.retry,
+        },
+      ],
+      ackAll: () => {},
+      retryAll: () => {},
+    } as unknown as MessageBatch<unknown>;
+  }
+
+  it('worker queue handler processes queued job messages', async () => {
+    const env = createTestEnv();
+    env.DB.jobs.set('job_worker_queue', {
+      id: 'job_worker_queue',
+      status: 'QUEUED',
+      total_items: 1,
+    });
+    let acknowledged = false;
+
+    await worker.queue?.(
+      queueBatchForBody(
+        {
+          jobId: 'job_worker_queue',
+          timestamp: new Date().toISOString(),
+          schemaVersion: 1,
+        },
+        {
+          ack: () => {
+            acknowledged = true;
+          },
+          retry: () => {},
+        },
+      ),
+      env,
+    );
+
+    expect(env.DB.jobs.get('job_worker_queue')?.status).toBe('PROCESSING');
+    expect(acknowledged).toBe(true);
+  });
+
+  it.each([null, 'not-json', 42, {}, { jobId: 'job_1' }, { jobId: 'job_1', schemaVersion: 2 }])(
+    'acks and discards malformed queue bodies without throwing: %s',
+    async (body) => {
+      const env = createTestEnv();
+      const ack = vi.fn();
+      const retry = vi.fn();
+
+      await expect(worker.queue?.(queueBatchForBody(body, { ack, retry }), env)).resolves.toBeUndefined();
+
+      expect(ack).toHaveBeenCalledTimes(1);
+      expect(retry).not.toHaveBeenCalled();
+      expect(env.DB.jobs.size).toBe(0);
+    },
+  );
+
+  it('ignores messages for jobs that do not exist', async () => {
+    const env = createTestEnv();
+
+    await expect(
+      processJobQueueMessage(env.DB, {
+        jobId: 'job_missing',
+        timestamp: new Date().toISOString(),
+        schemaVersion: 1,
+      }),
+    ).resolves.toEqual({ action: 'ignored_missing_job' });
+  });
+
+  it.each(['PROCESSING', 'COMPLETED', 'FAILED'] as const)(
+    'does not reprocess jobs already in %s',
+    async (status) => {
+      const env = createTestEnv();
+      env.DB.jobs.set('job_existing', {
+        id: 'job_existing',
+        status,
+        total_items: 1,
+      });
+
+      await expect(
+        processJobQueueMessage(env.DB, {
+          jobId: 'job_existing',
+          timestamp: new Date().toISOString(),
+          schemaVersion: 1,
+        }),
+      ).resolves.toEqual({ action: 'ignored_terminal_or_active', status });
+      expect(env.DB.jobs.get('job_existing')?.status).toBe(status);
+    },
+  );
+
+  it('moves queued jobs to processing without completing them', async () => {
+    const env = createTestEnv();
+    env.DB.jobs.set('job_queued', {
+      id: 'job_queued',
+      status: 'QUEUED',
+      total_items: 1,
+    });
+
+    await expect(
+      processJobQueueMessage(env.DB, {
+        jobId: 'job_queued',
+        timestamp: new Date().toISOString(),
+        schemaVersion: 1,
+      }),
+    ).resolves.toEqual({ action: 'started_processing' });
+    expect(env.DB.jobs.get('job_queued')?.status).toBe('PROCESSING');
   });
 });
 
