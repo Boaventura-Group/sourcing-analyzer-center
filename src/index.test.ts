@@ -7,6 +7,9 @@ type JobRecord = {
   id: string;
   status: string;
   total_items: number;
+  processed_items: number;
+  profitable_items: number;
+  error_items: number;
   updated_at?: string;
 };
 
@@ -20,6 +23,7 @@ type JobItemRecord = {
   supplier_cost: number;
   spreadsheet_sales_price: number | null;
   status: string;
+  error_message?: string | null;
 };
 
 type ItemResultRecord = Record<string, unknown>;
@@ -98,6 +102,9 @@ class FakeD1Database {
         id: String(id),
         status: String(status),
         total_items: Number(totalItems),
+        processed_items: 0,
+        profitable_items: 0,
+        error_items: 0,
       });
       return;
     }
@@ -125,7 +132,92 @@ class FakeD1Database {
         spreadsheet_sales_price:
           spreadsheetSalesPrice === null ? null : Number(spreadsheetSalesPrice),
         status: String(status),
+        error_message: null,
       });
+      return;
+    }
+
+    if (normalizedSql.startsWith('INSERT OR REPLACE INTO item_results')) {
+      const [
+        id,
+        jobId,
+        jobItemId,
+        asin,
+        ean,
+        title,
+        packQty,
+        supplierCost,
+        adjustedCost,
+        spreadsheetSalesPrice,
+        amazonBuyBox,
+        keepaBuyBox,
+        validatedSalesPrice,
+        amazonFeesEstimate,
+        prepFee,
+        netProfit,
+        roiPercent,
+        keepaRating,
+        keepaReviewCount,
+        keepaBsrCurrent,
+        keepaAvgBsr30,
+        keepaAvgBsr90,
+        keepaSalesRankDrops30,
+        keepaSalesRankDrops90,
+        keepaOfferCount,
+        keepaSellerCount,
+        priceStatus,
+        decisionStatus,
+        notes,
+        rawAmazonPricingJson,
+        rawAmazonFeesEstimateJson,
+        rawKeepaJson,
+        createdAt,
+        updatedAt,
+      ] = values;
+      const record: ItemResultRecord = {
+        id,
+        job_id: jobId,
+        job_item_id: jobItemId,
+        asin,
+        ean,
+        title,
+        pack_qty: packQty,
+        supplier_cost: supplierCost,
+        adjusted_cost: adjustedCost,
+        spreadsheet_sales_price: spreadsheetSalesPrice,
+        amazon_buy_box: amazonBuyBox,
+        keepa_buy_box: keepaBuyBox,
+        validated_sales_price: validatedSalesPrice,
+        amazon_fees_estimate: amazonFeesEstimate,
+        prep_fee: prepFee,
+        net_profit: netProfit,
+        roi_percent: roiPercent,
+        keepa_rating: keepaRating,
+        keepa_review_count: keepaReviewCount,
+        keepa_bsr_current: keepaBsrCurrent,
+        keepa_avg_bsr_30: keepaAvgBsr30,
+        keepa_avg_bsr_90: keepaAvgBsr90,
+        keepa_sales_rank_drops_30: keepaSalesRankDrops30,
+        keepa_sales_rank_drops_90: keepaSalesRankDrops90,
+        keepa_offer_count: keepaOfferCount,
+        keepa_seller_count: keepaSellerCount,
+        price_status: priceStatus,
+        decision_status: decisionStatus,
+        notes,
+        raw_amazon_pricing_json: rawAmazonPricingJson,
+        raw_amazon_fees_estimate_json: rawAmazonFeesEstimateJson,
+        raw_keepa_json: rawKeepaJson,
+        created_at: createdAt,
+        updated_at: updatedAt,
+      };
+      const existingIndex = this.itemResults.findIndex((result) => result.id === id);
+
+      if (existingIndex >= 0) {
+        this.itemResults[existingIndex] = record;
+      } else {
+        this.itemResults.push(record);
+      }
+
       return;
     }
 
@@ -135,6 +227,89 @@ class FakeD1Database {
 
       if (job && job.status === String(expectedStatus)) {
         job.status = String(status);
+        job.updated_at = String(updatedAt);
+      }
+
+      return;
+    }
+
+    if (
+      normalizedSql.startsWith(
+        "UPDATE job_items SET status = 'PROCESSING', error_message = NULL, updated_at = ? WHERE id = ? AND status IN ('CREATED', 'PROCESSING')",
+      )
+    ) {
+      const [, jobItemId] = values;
+      const item = this.jobItems.find((candidate) => candidate.id === jobItemId);
+
+      if (item && (item.status === 'CREATED' || item.status === 'PROCESSING')) {
+        item.status = 'PROCESSING';
+        item.error_message = null;
+      }
+
+      return;
+    }
+
+    if (
+      normalizedSql.startsWith(
+        "UPDATE job_items SET status = 'COMPLETED', error_message = NULL, updated_at = ? WHERE id = ?",
+      )
+    ) {
+      const [updatedAt, jobItemId] = values;
+      const item = this.jobItems.find((candidate) => candidate.id === jobItemId);
+
+      if (item) {
+        item.status = 'COMPLETED';
+        item.error_message = null;
+      }
+
+      void updatedAt;
+      return;
+    }
+
+    if (
+      normalizedSql.startsWith(
+        "UPDATE job_items SET status = 'FAILED', error_message = ?, updated_at = ? WHERE id = ?",
+      )
+    ) {
+      const [errorMessage, updatedAt, jobItemId] = values;
+      const item = this.jobItems.find((candidate) => candidate.id === jobItemId);
+
+      if (item) {
+        item.status = 'FAILED';
+        item.error_message = String(errorMessage);
+      }
+
+      void updatedAt;
+      return;
+    }
+
+    if (normalizedSql.startsWith('UPDATE jobs SET processed_items =')) {
+      const jobId = String(values.at(-1));
+      const job = this.jobs.get(jobId);
+
+      if (job) {
+        const jobItems = this.jobItems.filter((item) => item.job_id === jobId);
+        job.processed_items = jobItems.filter((item) =>
+          ['COMPLETED', 'FAILED'].includes(item.status),
+        ).length;
+        job.profitable_items = this.itemResults.filter(
+          (result) => result.job_id === jobId && result.decision_status === 'PROFIT_POSITIVE',
+        ).length;
+        job.error_items = jobItems.filter((item) => item.status === 'FAILED').length;
+      }
+
+      return;
+    }
+
+    if (normalizedSql.startsWith("UPDATE jobs SET status = 'COMPLETED', updated_at = ? WHERE id = ?")) {
+      const [updatedAt, jobId] = values;
+      const job = this.jobs.get(String(jobId));
+      const hasOpenItems = this.jobItems.some(
+        (item) => item.job_id === jobId && !['COMPLETED', 'FAILED'].includes(item.status),
+      );
+
+      if (job && job.status === 'PROCESSING' && !hasOpenItems) {
+        job.status = 'COMPLETED';
         job.updated_at = String(updatedAt);
       }
 
@@ -171,6 +346,13 @@ class FakeD1Database {
     if (normalizedSql.startsWith('SELECT * FROM item_results')) {
       const [jobId] = values;
       return this.itemResults.filter((result) => result.job_id === jobId) as T[];
+    }
+
+    if (normalizedSql.startsWith('SELECT id, job_id, row_number')) {
+      const [jobId] = values;
+      return this.jobItems
+        .filter((item) => item.job_id === jobId && ['CREATED', 'PROCESSING'].includes(item.status))
+        .sort((left, right) => left.row_number - right.row_number || left.id.localeCompare(right.id)) as T[];
     }
 
     throw new Error(`Unsupported fake D1 all SQL: ${normalizedSql}`);
@@ -619,6 +801,21 @@ describe('queue consumer', () => {
       id: 'job_worker_queue',
       status: 'QUEUED',
       total_items: 1,
+      processed_items: 0,
+      profitable_items: 0,
+      error_items: 0,
+    });
+    env.DB.jobItems.push({
+      id: 'job_item_worker_queue',
+      job_id: 'job_worker_queue',
+      row_number: 1,
+      ean: null,
+      asin: 'B000PROFIT',
+      supplier_title: 'Worker queue item',
+      supplier_cost: 5,
+      spreadsheet_sales_price: 20,
+      status: 'CREATED',
+      error_message: null,
     });
     let acknowledged = false;
 
@@ -639,7 +836,13 @@ describe('queue consumer', () => {
       env,
     );
 
-    expect(env.DB.jobs.get('job_worker_queue')?.status).toBe('PROCESSING');
+    expect(env.DB.jobs.get('job_worker_queue')).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 1,
+      profitable_items: 1,
+      error_items: 0,
+    });
+    expect(env.DB.itemResults).toHaveLength(1);
     expect(acknowledged).toBe(true);
   });
 
@@ -670,14 +873,50 @@ describe('queue consumer', () => {
     ).resolves.toEqual({ action: 'ignored_missing_job' });
   });
 
-  it.each(['PROCESSING', 'COMPLETED', 'FAILED'] as const)(
-    'does not reprocess jobs already in %s',
+  it('resumes jobs already in PROCESSING so queue retries can finish partial work', async () => {
+    const env = createTestEnv();
+    env.DB.jobs.set('job_existing', {
+      id: 'job_existing',
+      status: 'PROCESSING',
+      total_items: 1,
+      processed_items: 0,
+      profitable_items: 0,
+      error_items: 0,
+    });
+    env.DB.jobItems.push({
+      id: 'job_item_existing',
+      job_id: 'job_existing',
+      row_number: 1,
+      ean: null,
+      asin: 'B000PROFIT',
+      supplier_title: null,
+      supplier_cost: 5,
+      spreadsheet_sales_price: 20,
+      status: 'CREATED',
+      error_message: null,
+    });
+
+    await expect(
+      processJobQueueMessage(env.DB, {
+        jobId: 'job_existing',
+        timestamp: new Date().toISOString(),
+        schemaVersion: 1,
+      }),
+    ).resolves.toEqual({ action: 'processed', processedItems: 1, failedItems: 0 });
+    expect(env.DB.jobs.get('job_existing')?.status).toBe('COMPLETED');
+  });
+
+  it.each(['COMPLETED', 'FAILED'] as const)(
+    'does not reprocess terminal jobs already in %s',
     async (status) => {
       const env = createTestEnv();
       env.DB.jobs.set('job_existing', {
         id: 'job_existing',
         status,
         total_items: 1,
+        processed_items: 0,
+        profitable_items: 0,
+        error_items: 0,
       });
 
       await expect(
@@ -686,27 +925,183 @@ describe('queue consumer', () => {
           timestamp: new Date().toISOString(),
           schemaVersion: 1,
         }),
-      ).resolves.toEqual({ action: 'ignored_terminal_or_active', status });
+      ).resolves.toEqual({ action: 'ignored_terminal_job', status });
       expect(env.DB.jobs.get('job_existing')?.status).toBe(status);
     },
   );
 
-  it('moves queued jobs to processing without completing them', async () => {
+  it('processes queued jobs to completion with deterministic fake data and persisted results', async () => {
     const env = createTestEnv();
-    env.DB.jobs.set('job_queued', {
-      id: 'job_queued',
-      status: 'QUEUED',
-      total_items: 1,
-    });
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            {
+              asin: 'B000PROFIT',
+              supplierTitle: 'Supplier positive',
+              supplierCost: 5,
+              spreadsheetSalesPrice: 20,
+            },
+            {
+              asin: 'B000NEG001',
+              supplierTitle: 'Supplier negative',
+              supplierCost: 12,
+              spreadsheetSalesPrice: 10,
+            },
+            {
+              asin: 'B000PACK02',
+              supplierTitle: 'Supplier pack fallback',
+              supplierCost: 4,
+              spreadsheetSalesPrice: 20,
+            },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
 
     await expect(
       processJobQueueMessage(env.DB, {
-        jobId: 'job_queued',
+        jobId: created.jobId,
         timestamp: new Date().toISOString(),
         schemaVersion: 1,
       }),
-    ).resolves.toEqual({ action: 'started_processing' });
-    expect(env.DB.jobs.get('job_queued')?.status).toBe('PROCESSING');
+    ).resolves.toEqual({ action: 'processed', processedItems: 3, failedItems: 0 });
+    expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 3,
+      profitable_items: 2,
+      error_items: 0,
+    });
+    expect(env.DB.itemResults).toHaveLength(3);
+    expect(env.DB.itemResults.map((result) => result.decision_status)).toEqual(
+      expect.arrayContaining(['PROFIT_POSITIVE', 'NOT_PROFITABLE']),
+    );
+    expect(env.DB.itemResults.find((result) => result.asin === 'B000PACK02')).toMatchObject({
+      pack_qty: 2,
+      adjusted_cost: 8,
+      decision_status: 'PROFIT_POSITIVE',
+      roi_percent: expect.any(Number),
+    });
+
+    const resultsResponse = await worker.fetch(
+      new Request(`https://example.test/jobs/${created.jobId}/results`),
+      env,
+    );
+    const resultsBody = (await resultsResponse.json()) as { results: ItemResultRecord[] };
+
+    expect(resultsResponse.status).toBe(200);
+    expect(resultsBody.results).toHaveLength(3);
+  });
+
+  it('marks item-specific fake errors without retrying the whole message', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { asin: 'B0000ERROR', supplierCost: 5 },
+            { asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+
+    await expect(
+      processJobQueueMessage(env.DB, {
+        jobId: created.jobId,
+        timestamp: new Date().toISOString(),
+        schemaVersion: 1,
+      }),
+    ).resolves.toEqual({ action: 'processed', processedItems: 1, failedItems: 1 });
+    expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 2,
+      profitable_items: 1,
+      error_items: 1,
+    });
+    expect(env.DB.jobItems.find((item) => item.asin === 'B0000ERROR')).toMatchObject({
+      status: 'FAILED',
+      error_message: 'Controlled fake sourcing data failure',
+    });
+    expect(env.DB.jobItems.find((item) => item.asin === 'B000PROFIT')).toMatchObject({
+      status: 'COMPLETED',
+    });
+    expect(env.DB.itemResults).toHaveLength(1);
+    expect(env.DB.itemResults[0]).toMatchObject({ asin: 'B000PROFIT' });
+  });
+
+  it('does not duplicate results or corrupt counters when a completed job is retried', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 },
+            { asin: 'B000NEG001', supplierCost: 12, spreadsheetSalesPrice: 10 },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+    const message = {
+      jobId: created.jobId,
+      timestamp: new Date().toISOString(),
+      schemaVersion: 1 as const,
+    };
+
+    await processJobQueueMessage(env.DB, message);
+    await processJobQueueMessage(env.DB, message);
+
+    expect(env.DB.itemResults).toHaveLength(2);
+    expect(new Set(env.DB.itemResults.map((result) => result.id)).size).toBe(2);
+    expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 2,
+      profitable_items: 1,
+      error_items: 0,
+    });
+  });
+
+  it('persists skipped results when fake data has no Buy Box', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'B00000NOBB', supplierCost: 5, spreadsheetSalesPrice: 9 }],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+
+    await processJobQueueMessage(env.DB, {
+      jobId: created.jobId,
+      timestamp: new Date().toISOString(),
+      schemaVersion: 1,
+    });
+
+    expect(env.DB.jobs.get(created.jobId)).toMatchObject({
+      status: 'COMPLETED',
+      processed_items: 1,
+      profitable_items: 0,
+      error_items: 0,
+    });
+    expect(env.DB.itemResults).toHaveLength(1);
+    expect(env.DB.itemResults[0]).toMatchObject({
+      asin: 'B00000NOBB',
+      price_status: 'NO_BUYBOX',
+      decision_status: 'SKIPPED_NO_BUYBOX',
+      validated_sales_price: null,
+    });
   });
 });
 
