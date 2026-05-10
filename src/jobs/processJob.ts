@@ -27,7 +27,14 @@ import {
   type CalculateNetProfitInput,
   type DetectPackQtyInput,
 } from '../profit';
-import { logger } from '../utils/logger';
+import {
+  durationMsSince,
+  emitLogEvent,
+  emitMetric,
+  getErrorCode,
+  getErrorMessage,
+  sanitizeError,
+} from '../utils/observability';
 
 type ProcessJobQueueResult =
   | { action: 'ignored_missing_job' }
@@ -231,34 +238,57 @@ export async function processJobQueueMessage(
   db: D1Database,
   message: JobQueueMessage,
 ): Promise<ProcessJobQueueResult> {
+  const startedAtMs = Date.now();
+
   try {
     const job = await getD1JobById(db, message.jobId);
 
     if (!job) {
-      logger.info('job_processing_ignored', {
+      emitLogEvent('job_processing_ignored', {
+        stage: 'job_processing',
         jobId: message.jobId,
         schemaVersion: message.schemaVersion,
         reason: 'missing_job',
+      });
+      emitMetric({
+        name: 'jobs_ignored',
+        value: 1,
+        dimensions: { reason: 'missing_job' },
+        jobId: message.jobId,
       });
       return { action: 'ignored_missing_job' };
     }
 
     if (job.status === 'COMPLETED' || job.status === 'FAILED') {
-      logger.info('job_processing_ignored', {
+      emitLogEvent('job_processing_ignored', {
+        stage: 'job_processing',
         jobId: job.jobId,
         status: job.status,
         schemaVersion: message.schemaVersion,
         reason: 'terminal_job',
       });
+      emitMetric({
+        name: 'jobs_ignored',
+        value: 1,
+        dimensions: { reason: 'terminal_job', status: job.status },
+        jobId: job.jobId,
+      });
       return { action: 'ignored_terminal_job', status: job.status };
     }
 
     if (job.status === 'CREATED') {
-      logger.info('job_processing_ignored', {
+      emitLogEvent('job_processing_ignored', {
+        stage: 'job_processing',
         jobId: job.jobId,
         status: job.status,
         schemaVersion: message.schemaVersion,
         reason: 'unexpected_status',
+      });
+      emitMetric({
+        name: 'jobs_ignored',
+        value: 1,
+        dimensions: { reason: 'unexpected_status', status: job.status },
+        jobId: job.jobId,
       });
       return { action: 'ignored_unexpected_status', status: job.status };
     }
@@ -267,7 +297,8 @@ export async function processJobQueueMessage(
       await updateD1JobStatus(db, job.jobId, 'PROCESSING', 'QUEUED');
     }
 
-    logger.info('job_processing_started', {
+    emitLogEvent('job_processing_started', {
+      stage: 'job_processing',
       jobId: job.jobId,
       status: 'PROCESSING',
       schemaVersion: message.schemaVersion,
@@ -276,6 +307,10 @@ export async function processJobQueueMessage(
     const pendingItems = await getPendingJobItems(db, job.jobId);
     let processedItems = 0;
     let failedItems = 0;
+    let profitableItems = 0;
+    let priceMismatchReviewCount = 0;
+    let noBuyboxCount = 0;
+    let missingFeesCount = 0;
 
     for (const item of pendingItems) {
       await markJobItemProcessing(db, item.id);
@@ -288,40 +323,104 @@ export async function processJobQueueMessage(
         const errorMessage = getItemErrorMessage(error);
         await markJobItemFailed(db, item.id, errorMessage);
         failedItems += 1;
-        logger.warn('job_item_failed', {
+        emitLogEvent('job_item_failed', {
+          stage: 'job_processing',
           jobId: job.jobId,
           jobItemId: item.id,
           asin: item.asin,
+          status: 'FAILED',
+          errorCode: getErrorCode(error),
           errorMessage,
-        });
+        }, 'warn');
         continue;
       }
 
       await saveItemResult(db, result);
       await markJobItemCompleted(db, item.id);
       processedItems += 1;
-      logger.info('job_item_processed', {
+      if (result.decisionStatus === 'PROFIT_POSITIVE') {
+        profitableItems += 1;
+      }
+
+      if (result.priceStatus === 'BUYBOX_MISMATCH_REVIEW') {
+        priceMismatchReviewCount += 1;
+      }
+
+      if (result.decisionStatus === 'SKIPPED_NO_BUYBOX') {
+        noBuyboxCount += 1;
+      }
+
+      if (result.decisionStatus === 'SKIPPED_NO_FEES') {
+        missingFeesCount += 1;
+      }
+
+      emitLogEvent('job_item_processed', {
+        stage: 'job_processing',
         jobId: job.jobId,
         jobItemId: item.id,
         asin: item.asin,
+        status: result.decisionStatus,
         decisionStatus: result.decisionStatus,
+        priceStatus: result.priceStatus,
       });
     }
 
     await refreshJobCounters(db, job.jobId);
     await completeJobIfDone(db, job.jobId);
-    logger.info('job_processing_completed', {
+    const durationMs = durationMsSince(startedAtMs);
+    const finalizedItems = processedItems + failedItems;
+    emitLogEvent('job_processing_completed', {
+      stage: 'job_processing',
       jobId: job.jobId,
-      processedItems,
-      failedItems,
+      status: 'COMPLETED',
+      durationMs,
+      processedItems: finalizedItems,
+      profitableItems,
+      errorItems: failedItems,
     });
+    emitMetric({ name: 'jobs_completed', value: 1, jobId: job.jobId });
+    emitMetric({ name: 'queue_messages_processed', value: 1, jobId: job.jobId });
+    emitMetric({ name: 'items_processed', value: finalizedItems, jobId: job.jobId });
+    emitMetric({ name: 'processing_duration_ms', value: durationMs, jobId: job.jobId });
+
+    if (failedItems > 0) {
+      emitMetric({ name: 'items_failed', value: failedItems, jobId: job.jobId });
+    }
+
+    if (profitableItems > 0) {
+      emitMetric({ name: 'items_profitable', value: profitableItems, jobId: job.jobId });
+    }
+
+    if (priceMismatchReviewCount > 0) {
+      emitMetric({
+        name: 'price_mismatch_review_count',
+        value: priceMismatchReviewCount,
+        jobId: job.jobId,
+      });
+    }
+
+    if (noBuyboxCount > 0) {
+      emitMetric({ name: 'no_buybox_count', value: noBuyboxCount, jobId: job.jobId });
+    }
+
+    if (missingFeesCount > 0) {
+      emitMetric({ name: 'missing_fees_count', value: missingFeesCount, jobId: job.jobId });
+    }
 
     return { action: 'processed', processedItems, failedItems };
   } catch (error) {
-    logger.error('job_processing_retryable_error', {
+    emitLogEvent('job_processing_retryable_error', {
+      stage: 'job_processing',
       jobId: message.jobId,
       schemaVersion: message.schemaVersion,
-      error,
+      errorCode: getErrorCode(error),
+      errorMessage: getErrorMessage(error),
+      error: sanitizeError(error),
+    }, 'error');
+    emitMetric({
+      name: 'queue_messages_retryable_error',
+      value: 1,
+      jobId: message.jobId,
     });
     throw error;
   }
