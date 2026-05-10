@@ -33,7 +33,7 @@ export function selectValidatedPrice(input: SelectValidatedPriceInput): SelectVa
   const hasKeepaBuyBox = isUsablePrice(keepaBuyBox);
 
   if (hasAmazonBuyBox && hasKeepaBuyBox) {
-    const amazonVsKeepaPct = percentDifference(keepaBuyBox, amazonBuyBox);
+    const amazonVsKeepaPct = roundPercent(percentDifference(keepaBuyBox, amazonBuyBox));
     const priceStatus: PriceStatus =
       Math.abs(amazonVsKeepaPct) > threshold ? 'BUYBOX_MISMATCH_REVIEW' : 'BUYBOX_MATCHED';
     const notes =
@@ -45,7 +45,7 @@ export function selectValidatedPrice(input: SelectValidatedPriceInput): SelectVa
       validatedSalesPrice: amazonBuyBox,
       priceStatus,
       notes,
-      amazonVsKeepaPct: roundPercent(amazonVsKeepaPct),
+      amazonVsKeepaPct,
     };
   }
 

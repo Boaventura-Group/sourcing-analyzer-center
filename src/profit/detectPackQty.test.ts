@@ -28,6 +28,9 @@ describe('detectPackQty', () => {
     expect(detectPackQty('Cable 10cm')).toBe(1);
     expect(detectPackQty('Bottle 12oz')).toBe(1);
     expect(detectPackQty('Relief 24h')).toBe(1);
+    expect(detectPackQty('Photo Paper 10 x 15 cm')).toBe(1);
+    expect(detectPackQty('Frame 10 x 15cm')).toBe(1);
+    expect(detectPackQty('Cable 2 x 1m')).toBe(1);
   });
 
   it('prefers Amazon title over supplier title when both are present', () => {

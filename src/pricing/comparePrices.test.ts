@@ -26,6 +26,16 @@ describe('comparePrices', () => {
     expect(result.hasDivergence).toBe(false);
   });
 
+  it('uses rounded percentage when checking divergence at the threshold', () => {
+    const result = comparePrices({
+      spreadsheetSalesPrice: 1.02,
+      amazonBuyBox: 1,
+    });
+
+    expect(result.spreadsheetVsAmazon).toMatchObject({ percent: 2, isDivergent: false });
+    expect(result.hasDivergence).toBe(false);
+  });
+
   it('does not divide by zero or missing references', () => {
     const result = comparePrices({
       spreadsheetSalesPrice: 10,

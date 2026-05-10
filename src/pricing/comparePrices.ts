@@ -41,10 +41,10 @@ function compare(
     return undefined;
   }
 
-  const percent = ((candidate - reference) / reference) * 100;
+  const percent = roundPercent(((candidate - reference) / reference) * 100);
 
   return {
-    percent: roundPercent(percent),
+    percent,
     isDivergent: Math.abs(percent) > threshold,
   };
 }

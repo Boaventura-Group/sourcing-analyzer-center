@@ -56,4 +56,16 @@ describe('calculateNetProfit', () => {
       decisionStatus: 'SKIPPED_NO_FEES',
     });
   });
+
+  it('returns a controlled status when validated sales price is missing', () => {
+    expect(
+      calculateNetProfit({
+        adjustedCost: 10,
+        amazonFeesEstimate: 3,
+      }),
+    ).toMatchObject({
+      status: 'MISSING_PRICE',
+      decisionStatus: 'SKIPPED_NO_BUYBOX',
+    });
+  });
 });

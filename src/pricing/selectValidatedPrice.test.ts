@@ -9,6 +9,13 @@ describe('selectValidatedPrice', () => {
     });
   });
 
+  it('uses rounded percentage when checking the mismatch threshold', () => {
+    expect(selectValidatedPrice({ amazonBuyBox: 1, keepaBuyBox: 1.02 })).toMatchObject({
+      amazonVsKeepaPct: 2,
+      priceStatus: 'BUYBOX_MATCHED',
+    });
+  });
+
   it('uses Amazon Buy Box and marks review when Amazon and Keepa differ by more than 2 percent', () => {
     expect(selectValidatedPrice({ amazonBuyBox: 10, keepaBuyBox: 9 })).toMatchObject({
       validatedSalesPrice: 10,
