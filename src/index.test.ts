@@ -28,7 +28,7 @@ type JobItemRecord = {
 
 type ItemResultRecord = Record<string, unknown>;
 
-type RunResult = { success: true };
+type RunResult = { success: true; meta: { changes: number } };
 type QueueSendOptions = Parameters<Queue<JobQueueMessage>['send']>[1];
 
 class FakeQueue {
@@ -59,8 +59,9 @@ class FakePreparedStatement {
   }
 
   async run(): Promise<RunResult> {
+    this.db.lastRunChanges = 1;
     this.db.executeRun(this.sql, this.values);
-    return { success: true };
+    return { success: true, meta: { changes: this.db.lastRunChanges } };
   }
 
   async first<T>(): Promise<T | null> {
@@ -78,6 +79,8 @@ class FakeD1Database {
   readonly itemResults: ItemResultRecord[] = [];
   failNextAll = false;
   failNextFirst = false;
+  forceNextCompleteJobNoop = false;
+  lastRunChanges = 1;
 
   prepare(sql: string): FakePreparedStatement {
     return new FakePreparedStatement(this, sql);
@@ -308,11 +311,20 @@ class FakeD1Database {
         (item) => item.job_id === jobId && !['COMPLETED', 'FAILED'].includes(item.status),
       );
 
+      if (this.forceNextCompleteJobNoop) {
+        this.forceNextCompleteJobNoop = false;
+        this.lastRunChanges = 0;
+        return;
+      }
+
       if (job && job.status === 'PROCESSING' && !hasOpenItems) {
         job.status = 'COMPLETED';
         job.updated_at = String(updatedAt);
+        this.lastRunChanges = 1;
+        return;
       }
 
+      this.lastRunChanges = 0;
       return;
     }
 
@@ -1331,6 +1343,37 @@ describe('queue consumer', () => {
       profitable_items: 1,
       error_items: 0,
     });
+    expect(getMetricNames().filter((name) => name === 'jobs_completed')).toHaveLength(1);
+    expect(getStructuredLogPayloads('info', 'job_processing_completed')).toHaveLength(1);
+  });
+
+  it('does not emit job completion when completeJobIfDone is a no-op', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 }],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+    env.DB.forceNextCompleteJobNoop = true;
+
+    await expect(processJobQueueMessage(env.DB, queueMessage(created.jobId))).resolves.toEqual({
+      action: 'processed',
+      processedItems: 1,
+      failedItems: 0,
+    });
+
+    expect(env.DB.itemResults).toHaveLength(1);
+    expect(new Set(env.DB.itemResults.map((result) => result.job_item_id)).size).toBe(1);
+    expect(getMetricNames()).toEqual(
+      expect.arrayContaining(['queue_messages_processed', 'processing_duration_ms']),
+    );
+    expect(getMetricNames().filter((name) => name === 'jobs_completed')).toHaveLength(0);
+    expect(getStructuredLogPayloads('info', 'job_processing_completed')).toHaveLength(0);
   });
 
   it('persists skipped results when fake data has no Buy Box', async () => {

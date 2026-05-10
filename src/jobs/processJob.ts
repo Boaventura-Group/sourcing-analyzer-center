@@ -366,19 +366,23 @@ export async function processJobQueueMessage(
     }
 
     await refreshJobCounters(db, job.jobId);
-    await completeJobIfDone(db, job.jobId);
+    const didCompleteJob = await completeJobIfDone(db, job.jobId);
     const durationMs = durationMsSince(startedAtMs);
     const finalizedItems = processedItems + failedItems;
-    emitLogEvent('job_processing_completed', {
-      stage: 'job_processing',
-      jobId: job.jobId,
-      status: 'COMPLETED',
-      durationMs,
-      processedItems: finalizedItems,
-      profitableItems,
-      errorItems: failedItems,
-    });
-    emitMetric({ name: 'jobs_completed', value: 1, jobId: job.jobId });
+
+    if (didCompleteJob) {
+      emitLogEvent('job_processing_completed', {
+        stage: 'job_processing',
+        jobId: job.jobId,
+        status: 'COMPLETED',
+        durationMs,
+        processedItems: finalizedItems,
+        profitableItems,
+        errorItems: failedItems,
+      });
+      emitMetric({ name: 'jobs_completed', value: 1, jobId: job.jobId });
+    }
+
     emitMetric({ name: 'queue_messages_processed', value: 1, jobId: job.jobId });
     emitMetric({ name: 'items_processed', value: finalizedItems, jobId: job.jobId });
     emitMetric({ name: 'processing_duration_ms', value: durationMs, jobId: job.jobId });
