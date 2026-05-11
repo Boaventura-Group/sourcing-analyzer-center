@@ -17,7 +17,10 @@ import {
 export type Env = {
   DB: D1Database;
   JOB_QUEUE: Queue<JobQueueMessage>;
+  SAC_INTERNAL_TOKEN: string;
 };
+
+const INTERNAL_TOKEN_HEADER = 'x-sac-internal-token';
 
 export default {
   async fetch(request, env): Promise<Response> {
@@ -117,12 +120,22 @@ async function routeRequest(
     }
 
     if (request.method === 'POST' && url.pathname === '/jobs') {
+      const authError = validateInternalAuth(request, env);
+      if (authError) {
+        return authError;
+      }
+
       return handleCreateJob(request, env.DB, env.JOB_QUEUE, { traceId });
     }
 
     const jobPathMatch = /^\/jobs\/([^/]+)(?:\/(results))?$/.exec(url.pathname);
 
     if (jobPathMatch) {
+      const authError = validateInternalAuth(request, env);
+      if (authError) {
+        return authError;
+      }
+
       const jobId = decodeURIComponent(jobPathMatch[1] ?? '');
       const subResource = jobPathMatch[2];
 
@@ -136,4 +149,18 @@ async function routeRequest(
     }
 
     return jsonError('not_found', 'Route not found', 404);
+}
+
+function validateInternalAuth(request: Request, env: Env): Response | null {
+  const configuredToken = env.SAC_INTERNAL_TOKEN;
+
+  if (!configuredToken) {
+    return jsonError('internal_auth_not_configured', 'Internal authentication is not configured', 500);
+  }
+
+  if (request.headers.get(INTERNAL_TOKEN_HEADER) !== configuredToken) {
+    return jsonError('unauthorized', 'Unauthorized', 401);
+  }
+
+  return null;
 }

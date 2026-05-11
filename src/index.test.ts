@@ -355,9 +355,11 @@ class FakeD1Database {
 
     const normalizedSql = sql.replace(/\s+/g, ' ').trim();
 
-    if (normalizedSql.startsWith('SELECT * FROM item_results')) {
+    if (normalizedSql.startsWith('SELECT asin, ean, title, supplier_cost')) {
       const [jobId] = values;
-      return this.itemResults.filter((result) => result.job_id === jobId) as T[];
+      return this.itemResults.filter(
+        (result) => result.job_id === jobId && Number(result.net_profit) > 0,
+      ) as T[];
     }
 
     if (normalizedSql.startsWith('SELECT id, job_id, row_number')) {
@@ -371,10 +373,51 @@ class FakeD1Database {
   }
 }
 
+const INTERNAL_TOKEN = 'test-internal-token';
+type WorkerFetchRequest = Parameters<typeof worker.fetch>[0];
+const PUBLIC_RESULT_KEYS = [
+  'asin',
+  'ean',
+  'title',
+  'supplierCost',
+  'packQty',
+  'adjustedCost',
+  'spreadsheetSalesPrice',
+  'amazonBuyBox',
+  'keepaBuyBox',
+  'validatedSalesPrice',
+  'amazonFeesEstimate',
+  'prepFee',
+  'netProfit',
+  'roiPercent',
+  'keepaRating',
+  'keepaReviewCount',
+  'keepaBsrCurrent',
+  'keepaAvgBsr30',
+  'keepaAvgBsr90',
+  'keepaSalesRankDrops30',
+  'keepaSalesRankDrops90',
+  'keepaOfferCount',
+  'keepaSellerCount',
+  'priceStatus',
+  'decisionStatus',
+  'notes',
+] as const;
+
 function createTestEnv(): Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue } {
   const db = new FakeD1Database();
   const jobQueue = new FakeQueue();
-  return { DB: db, JOB_QUEUE: jobQueue } as Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue };
+  return {
+    DB: db,
+    JOB_QUEUE: jobQueue,
+    SAC_INTERNAL_TOKEN: INTERNAL_TOKEN,
+  } as Env & { DB: FakeD1Database; JOB_QUEUE: FakeQueue };
+}
+
+function internalRequest(input: string, init: RequestInit = {}): WorkerFetchRequest {
+  const headers = new Headers(init.headers);
+  headers.set('x-sac-internal-token', INTERNAL_TOKEN);
+  return new Request(input, { ...init, headers }) as WorkerFetchRequest;
 }
 
 type ConsoleMethod = 'info' | 'warn' | 'error';
@@ -418,11 +461,87 @@ describe('GET /health', () => {
   });
 });
 
+describe('internal job endpoint auth', () => {
+  it('allows health checks without the internal token', async () => {
+    const response = await worker.fetch(new Request('https://example.test/health'), createTestEnv());
+
+    expect(response.status).toBe(200);
+  });
+
+  it('rejects POST /jobs when the internal token is missing', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'b000test13', supplierCost: 10 }],
+        }),
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'unauthorized',
+        message: 'Unauthorized',
+      },
+    });
+  });
+
+  it.each([
+    ['GET /jobs/:jobId', 'https://example.test/jobs/job_missing'],
+    ['GET /jobs/:jobId/results', 'https://example.test/jobs/job_missing/results'],
+  ])('rejects %s when the internal token is missing', async (_route, url) => {
+    const response = await worker.fetch(new Request(url), createTestEnv());
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'unauthorized',
+        message: 'Unauthorized',
+      },
+    });
+  });
+
+  it('rejects job reads when the internal token is invalid without logging the token value', async () => {
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs/job_missing', {
+        headers: { 'x-sac-internal-token': 'wrong-token' },
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'unauthorized',
+        message: 'Unauthorized',
+      },
+    });
+    expect(JSON.stringify(getStructuredLogPayloads('info'))).not.toContain('wrong-token');
+    expect(JSON.stringify(getStructuredLogPayloads('error'))).not.toContain('wrong-token');
+  });
+
+  it('allows POST /jobs when the internal token is valid', async () => {
+    const response = await worker.fetch(
+      internalRequest('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [{ asin: 'b000test14', supplierCost: 10 }],
+        }),
+      }),
+      createTestEnv(),
+    );
+
+    expect(response.status).toBe(201);
+  });
+});
+
 describe('POST /jobs', () => {
   it('creates a D1 job and normalizes ASIN values', async () => {
     const env = createTestEnv();
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'b000test01', ean: '5012345678900', supplierCost: 10 }],
@@ -461,7 +580,7 @@ describe('POST /jobs', () => {
   it('emits correlated HTTP and job_created structured logs', async () => {
     const env = createTestEnv();
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'cf-ray': 'ray-create-job' },
         body: JSON.stringify({
@@ -509,7 +628,7 @@ describe('POST /jobs', () => {
     env.JOB_QUEUE.failNextSend = true;
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'b000test11', supplierCost: 10 }],
@@ -553,7 +672,7 @@ describe('POST /jobs', () => {
 
   it('returns standardized validation errors for invalid payloads', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({ items: [] }),
       }),
@@ -571,7 +690,7 @@ describe('POST /jobs', () => {
 
   it('rejects jobs with more than 100 items', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: Array.from({ length: 101 }, () => ({
@@ -595,7 +714,7 @@ describe('POST /jobs', () => {
     ].join('\n');
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv; charset=utf-8' },
         body: csv,
@@ -625,7 +744,7 @@ describe('POST /jobs', () => {
     const csv = ['ASIN,Cost,Cost Price', 'B000TEST10,,10.50'].join('\n');
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: csv,
@@ -655,7 +774,7 @@ describe('POST /jobs', () => {
     ].join('\n');
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: csv,
@@ -686,7 +805,7 @@ describe('POST /jobs', () => {
     const env = createTestEnv();
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -713,7 +832,7 @@ describe('POST /jobs', () => {
 
   it('returns a controlled error for malformed CSV', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: 'ASIN,Cost Price\n"B000TEST07,10',
@@ -732,7 +851,7 @@ describe('POST /jobs', () => {
 
   it('rejects CSV rows with invalid cost values', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: 'ASIN,Cost Price\nB000TEST08,not-a-price',
@@ -751,7 +870,7 @@ describe('POST /jobs', () => {
 
   it('rejects CSV rows without ASIN', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: 'ASIN,Cost Price\n,10.00',
@@ -768,7 +887,7 @@ describe('POST /jobs', () => {
       return `B${suffix}01,10`;
     });
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: ['ASIN,Cost Price', ...rows].join('\n'),
@@ -789,7 +908,7 @@ describe('POST /jobs', () => {
     ].join('\n');
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         headers: { 'content-type': 'text/csv' },
         body: csv,
@@ -813,7 +932,7 @@ describe('GET /jobs/:jobId', () => {
   it('returns job status for a previously created job', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'b000test02', supplierCost: 11 }],
@@ -824,7 +943,7 @@ describe('GET /jobs/:jobId', () => {
     const created = (await createResponse.json()) as { jobId: string };
 
     const response = await worker.fetch(
-      new Request(`https://example.test/jobs/${created.jobId}`),
+      internalRequest(`https://example.test/jobs/${created.jobId}`),
       env,
     );
 
@@ -838,7 +957,7 @@ describe('GET /jobs/:jobId', () => {
 
   it('returns standardized 404 JSON when the job does not exist', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs/job_missing'),
+      internalRequest('https://example.test/jobs/job_missing'),
       createTestEnv(),
     );
 
@@ -856,7 +975,7 @@ describe('GET /jobs/:jobId', () => {
     env.DB.failNextFirst = true;
 
     const response = await worker.fetch(
-      new Request('https://example.test/jobs/job_d1_error'),
+      internalRequest('https://example.test/jobs/job_d1_error'),
       env,
     );
 
@@ -1092,7 +1211,7 @@ describe('queue consumer', () => {
   it('processes queued jobs to completion with deterministic fake data and persisted results', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [
@@ -1146,13 +1265,13 @@ describe('queue consumer', () => {
     });
 
     const resultsResponse = await worker.fetch(
-      new Request(`https://example.test/jobs/${created.jobId}/results`),
+      internalRequest(`https://example.test/jobs/${created.jobId}/results`),
       env,
     );
     const resultsBody = (await resultsResponse.json()) as { results: ItemResultRecord[] };
 
     expect(resultsResponse.status).toBe(200);
-    expect(resultsBody.results).toHaveLength(3);
+    expect(resultsBody.results).toHaveLength(2);
   });
 
   it.each([5, 20, 100])(
@@ -1160,7 +1279,7 @@ describe('queue consumer', () => {
     async (itemCount) => {
       const env = createTestEnv();
       const createResponse = await worker.fetch(
-        new Request('https://example.test/jobs', {
+        internalRequest('https://example.test/jobs', {
           method: 'POST',
           body: JSON.stringify({
             items: createBatchItems(itemCount),
@@ -1192,7 +1311,7 @@ describe('queue consumer', () => {
   it('emits structured processing events and metric logs without raw payloads or secrets', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [
@@ -1274,7 +1393,7 @@ describe('queue consumer', () => {
   it('marks item-specific fake errors without retrying the whole message', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [
@@ -1314,7 +1433,7 @@ describe('queue consumer', () => {
   it('does not duplicate results or corrupt counters when a completed job is retried', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [
@@ -1350,7 +1469,7 @@ describe('queue consumer', () => {
   it('does not emit job completion when completeJobIfDone is a no-op', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 }],
@@ -1379,7 +1498,7 @@ describe('queue consumer', () => {
   it('persists skipped results when fake data has no Buy Box', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'B00000NOBB', supplierCost: 5, spreadsheetSalesPrice: 9 }],
@@ -1413,7 +1532,7 @@ describe('queue consumer', () => {
   it('emits review and insufficient-data metrics for mismatch, no Buy Box, and no fees', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [
@@ -1464,7 +1583,7 @@ describe('GET /jobs/:jobId/results', () => {
   it('returns an empty stable results envelope for this phase', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'b000test03', supplierCost: 12 }],
@@ -1475,7 +1594,7 @@ describe('GET /jobs/:jobId/results', () => {
     const created = (await createResponse.json()) as { jobId: string };
 
     const response = await worker.fetch(
-      new Request(`https://example.test/jobs/${created.jobId}/results`),
+      internalRequest(`https://example.test/jobs/${created.jobId}/results`),
       env,
     );
 
@@ -1487,9 +1606,55 @@ describe('GET /jobs/:jobId/results', () => {
     });
   });
 
+  it('returns only profitable public results without raw external payload fields', async () => {
+    const env = createTestEnv();
+    const createResponse = await worker.fetch(
+      internalRequest('https://example.test/jobs', {
+        method: 'POST',
+        body: JSON.stringify({
+          items: [
+            { asin: 'B000PROFIT', supplierCost: 5, spreadsheetSalesPrice: 20 },
+            { asin: 'B000NEG001', supplierCost: 12, spreadsheetSalesPrice: 10 },
+            { asin: 'B000PACK02', supplierCost: 4, spreadsheetSalesPrice: 20 },
+          ],
+        }),
+      }),
+      env,
+    );
+    const created = (await createResponse.json()) as { jobId: string };
+
+    await processJobQueueMessage(env.DB, {
+      jobId: created.jobId,
+      timestamp: new Date().toISOString(),
+      schemaVersion: 1,
+    });
+
+    const response = await worker.fetch(
+      internalRequest(`https://example.test/jobs/${created.jobId}/results`),
+      env,
+    );
+    const body = (await response.json()) as { results: Array<Record<string, unknown>> };
+    const serialized = JSON.stringify(body);
+
+    expect(response.status).toBe(200);
+    expect(body.results).toHaveLength(2);
+    expect(body.results.map((result) => result.asin)).toEqual(['B000PROFIT', 'B000PACK02']);
+    for (const result of body.results) {
+      expect(Object.keys(result).every((key) => PUBLIC_RESULT_KEYS.includes(key as typeof PUBLIC_RESULT_KEYS[number]))).toBe(true);
+      expect(result.netProfit).toEqual(expect.any(Number));
+      expect(Number(result.netProfit)).toBeGreaterThan(0);
+    }
+    expect(serialized).not.toContain('raw_amazon_pricing_json');
+    expect(serialized).not.toContain('raw_amazon_fees_estimate_json');
+    expect(serialized).not.toContain('raw_keepa_json');
+    expect(serialized).not.toContain('rawAmazonPricing');
+    expect(serialized).not.toContain('rawAmazonFeesEstimate');
+    expect(serialized).not.toContain('rawKeepa');
+  });
+
   it('returns standardized 404 JSON when results are requested for a missing job', async () => {
     const response = await worker.fetch(
-      new Request('https://example.test/jobs/job_missing/results'),
+      internalRequest('https://example.test/jobs/job_missing/results'),
       createTestEnv(),
     );
 
@@ -1505,7 +1670,7 @@ describe('GET /jobs/:jobId/results', () => {
   it('normalizes unexpected D1 result errors without exposing details', async () => {
     const env = createTestEnv();
     const createResponse = await worker.fetch(
-      new Request('https://example.test/jobs', {
+      internalRequest('https://example.test/jobs', {
         method: 'POST',
         body: JSON.stringify({
           items: [{ asin: 'b000test04', supplierCost: 13 }],
@@ -1517,7 +1682,7 @@ describe('GET /jobs/:jobId/results', () => {
     env.DB.failNextAll = true;
 
     const response = await worker.fetch(
-      new Request(`https://example.test/jobs/${created.jobId}/results`),
+      internalRequest(`https://example.test/jobs/${created.jobId}/results`),
       env,
     );
 
