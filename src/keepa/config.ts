@@ -27,6 +27,16 @@ function parsePositiveNumber(value: string | undefined, fallback: number): numbe
   return parsed;
 }
 
+function parsePositiveInteger(value: string | undefined, fallback: number, name: string): number {
+  const parsed = parsePositiveNumber(value, fallback);
+
+  if (!Number.isInteger(parsed)) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+
+  return parsed;
+}
+
 export function createKeepaConfig(env: KeepaEnv): Required<Omit<KeepaConfig, 'baseUrl'>> {
   const apiKey = env.KEEPA_API_KEY?.trim();
 
@@ -36,7 +46,7 @@ export function createKeepaConfig(env: KeepaEnv): Required<Omit<KeepaConfig, 'ba
 
   return {
     apiKey,
-    domain: parsePositiveNumber(env.KEEPA_DOMAIN, 2),
+    domain: parsePositiveInteger(env.KEEPA_DOMAIN, 2, 'KEEPA_DOMAIN'),
     initialOperationalTokens: parsePositiveNumber(env.KEEPA_INITIAL_OPERATIONAL_TOKENS, 300),
     refillTokensPerMinute: parsePositiveNumber(env.KEEPA_REFILL_TOKENS_PER_MINUTE, 5),
   };

@@ -109,6 +109,26 @@ describe('createKeepaClient', () => {
       expect(String(error)).not.toContain('keepa-secret-key');
     }
   });
+
+  it('redacts JSON-style secrets from stored Keepa HTTP error bodies', async () => {
+    const fetch: typeof globalThis.fetch = async () =>
+      new Response('{"apiKey":"keepa-secret-key","message":"bad token keepa-secret-key"}', {
+        status: 401,
+        headers: { 'content-type': 'application/json' },
+      });
+    const client = createKeepaClient(config, { fetch });
+
+    try {
+      await client.getProducts(['B000TEST01']);
+    } catch (error) {
+      expect(error).toBeInstanceOf(KeepaHttpError);
+      expect((error as KeepaHttpError).body).toContain('"apiKey":"[REDACTED]"');
+      expect((error as KeepaHttpError).body).not.toContain('keepa-secret-key');
+      return;
+    }
+
+    throw new Error('Expected KeepaHttpError');
+  });
 });
 
 describe('estimateKeepaMainProductTokens', () => {

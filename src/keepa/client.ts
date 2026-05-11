@@ -101,9 +101,39 @@ function redactKeepaUrl(url: URL): string {
   return redacted.toString();
 }
 
-function sanitizeText(value: string): string {
-  const sanitized = sanitizeLogPayload(value);
-  return typeof sanitized === 'string' ? sanitized : 'Unexpected Keepa response';
+function redactKnownSecretValues(value: string, secrets: string[]): string {
+  return secrets.reduce((redacted, secret) => {
+    if (secret.length === 0) {
+      return redacted;
+    }
+
+    return redacted.split(secret).join('[REDACTED]');
+  }, value);
+}
+
+function redactSensitiveKeyValuePairs(value: string): string {
+  return value
+    .replace(
+      /(["']?(?:api[_-]?key|token|secret|credential|password)["']?\s*[:=]\s*["']?)([^"',\s};&]+)/gi,
+      (_match, prefix: string) => `${prefix}[REDACTED]`,
+    )
+    .replace(
+      /(\b(?:api[_-]?key|token|secret|credential|password)\s+)([^\s,;]+)/gi,
+      (_match, prefix: string) => `${prefix}[REDACTED]`,
+    );
+}
+
+function sanitizeText(value: string, url: URL): string {
+  const knownSecrets = [url.searchParams.get('key') ?? ''];
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return redactKnownSecretValues(JSON.stringify(sanitizeLogPayload(parsed)), knownSecrets);
+  } catch {
+    const sanitized = sanitizeLogPayload(value);
+    const sanitizedText = typeof sanitized === 'string' ? sanitized : 'Unexpected Keepa response';
+    return redactKnownSecretValues(redactSensitiveKeyValuePairs(sanitizedText), knownSecrets);
+  }
 }
 
 export class KeepaHttpError extends Error {
@@ -113,7 +143,7 @@ export class KeepaHttpError extends Error {
 
   constructor(status: number, url: URL, body: string) {
     const safeUrl = redactKeepaUrl(url);
-    const safeBody = sanitizeText(body);
+    const safeBody = sanitizeText(body, url);
     super(`Keepa HTTP ${status} for ${safeUrl}`);
     this.name = 'KeepaHttpError';
     this.status = status;
