@@ -37,4 +37,20 @@ describe('MCP conceptual contracts', () => {
       getSourcingJobResultsContract.inputSchema.parse({ jobId: 'job_000001' }),
     ).toEqual({ jobId: 'job_000001' });
   });
+
+  it('rejects raw provider fields in get_sourcing_job_results output', () => {
+    expect(() =>
+      getSourcingJobResultsContract.outputSchema.parse({
+        jobId: 'job_000001',
+        status: 'COMPLETED',
+        results: [
+          {
+            asin: 'B000TEST01',
+            netProfit: 1,
+            raw_keepa_json: '{}',
+          },
+        ],
+      }),
+    ).toThrow();
+  });
 });

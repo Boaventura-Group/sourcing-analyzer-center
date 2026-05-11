@@ -5,6 +5,7 @@ import type {
   JobResultsResponse,
   JobStatus,
   JobStatusResponse,
+  PublicJobResult,
   SupplierItemInput,
 } from './types';
 
@@ -14,7 +15,34 @@ type D1JobRow = {
   total_items: number;
 };
 
-type D1ItemResultRow = Record<string, unknown>;
+type D1PublicItemResultRow = {
+  asin: string;
+  ean: string | null;
+  title: string | null;
+  supplier_cost: number | null;
+  pack_qty: number | null;
+  adjusted_cost: number | null;
+  spreadsheet_sales_price: number | null;
+  amazon_buy_box: number | null;
+  keepa_buy_box: number | null;
+  validated_sales_price: number | null;
+  amazon_fees_estimate: number | null;
+  prep_fee: number | null;
+  net_profit: number | null;
+  roi_percent: number | null;
+  keepa_rating: number | null;
+  keepa_review_count: number | null;
+  keepa_bsr_current: number | null;
+  keepa_avg_bsr_30: number | null;
+  keepa_avg_bsr_90: number | null;
+  keepa_sales_rank_drops_30: number | null;
+  keepa_sales_rank_drops_90: number | null;
+  keepa_offer_count: number | null;
+  keepa_seller_count: number | null;
+  price_status: string | null;
+  decision_status: string | null;
+  notes: string | null;
+};
 
 type D1JobItemRow = {
   id: string;
@@ -126,6 +154,61 @@ function mapD1JobItem(row: D1JobItemRow): D1JobItem {
   }
 
   return item;
+}
+
+function parseNotes(notes: string | null): string[] | undefined {
+  if (notes === null) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(notes) as unknown;
+    if (Array.isArray(parsed)) {
+      return parsed.filter((note): note is string => typeof note === 'string');
+    }
+  } catch {
+    // Keep older non-JSON notes readable without exposing raw provider payloads.
+  }
+
+  return notes.trim().length > 0 ? [notes] : undefined;
+}
+
+function mapPublicJobResult(row: D1PublicItemResultRow): PublicJobResult {
+  const result: PublicJobResult = {
+    asin: row.asin,
+  };
+
+  if (row.ean !== null) result.ean = row.ean;
+  if (row.title !== null) result.title = row.title;
+  if (row.supplier_cost !== null) result.supplierCost = row.supplier_cost;
+  if (row.pack_qty !== null) result.packQty = row.pack_qty;
+  if (row.adjusted_cost !== null) result.adjustedCost = row.adjusted_cost;
+  if (row.spreadsheet_sales_price !== null) result.spreadsheetSalesPrice = row.spreadsheet_sales_price;
+  if (row.amazon_buy_box !== null) result.amazonBuyBox = row.amazon_buy_box;
+  if (row.keepa_buy_box !== null) result.keepaBuyBox = row.keepa_buy_box;
+  if (row.validated_sales_price !== null) result.validatedSalesPrice = row.validated_sales_price;
+  if (row.amazon_fees_estimate !== null) result.amazonFeesEstimate = row.amazon_fees_estimate;
+  if (row.prep_fee !== null) result.prepFee = row.prep_fee;
+  if (row.net_profit !== null) result.netProfit = row.net_profit;
+  if (row.roi_percent !== null) result.roiPercent = row.roi_percent;
+  if (row.keepa_rating !== null) result.keepaRating = row.keepa_rating;
+  if (row.keepa_review_count !== null) result.keepaReviewCount = row.keepa_review_count;
+  if (row.keepa_bsr_current !== null) result.keepaBsrCurrent = row.keepa_bsr_current;
+  if (row.keepa_avg_bsr_30 !== null) result.keepaAvgBsr30 = row.keepa_avg_bsr_30;
+  if (row.keepa_avg_bsr_90 !== null) result.keepaAvgBsr90 = row.keepa_avg_bsr_90;
+  if (row.keepa_sales_rank_drops_30 !== null) result.keepaSalesRankDrops30 = row.keepa_sales_rank_drops_30;
+  if (row.keepa_sales_rank_drops_90 !== null) result.keepaSalesRankDrops90 = row.keepa_sales_rank_drops_90;
+  if (row.keepa_offer_count !== null) result.keepaOfferCount = row.keepa_offer_count;
+  if (row.keepa_seller_count !== null) result.keepaSellerCount = row.keepa_seller_count;
+  if (row.price_status !== null) result.priceStatus = row.price_status;
+  if (row.decision_status !== null) result.decisionStatus = row.decision_status;
+
+  const notes = parseNotes(row.notes);
+  if (notes !== undefined) {
+    result.notes = notes;
+  }
+
+  return result;
 }
 
 export async function createD1Job(
@@ -456,17 +539,44 @@ export async function getD1JobResults(
 
   const results = await db
     .prepare(
-      `SELECT *
+      `SELECT
+         asin,
+         ean,
+         title,
+         supplier_cost,
+         pack_qty,
+         adjusted_cost,
+         spreadsheet_sales_price,
+         amazon_buy_box,
+         keepa_buy_box,
+         validated_sales_price,
+         amazon_fees_estimate,
+         prep_fee,
+         net_profit,
+         roi_percent,
+         keepa_rating,
+         keepa_review_count,
+         keepa_bsr_current,
+         keepa_avg_bsr_30,
+         keepa_avg_bsr_90,
+         keepa_sales_rank_drops_30,
+         keepa_sales_rank_drops_90,
+         keepa_offer_count,
+         keepa_seller_count,
+         price_status,
+         decision_status,
+         notes
        FROM item_results
        WHERE job_id = ?
+         AND net_profit > 0
        ORDER BY created_at ASC, id ASC`,
     )
     .bind(jobId)
-    .all<D1ItemResultRow>();
+    .all<D1PublicItemResultRow>();
 
   return {
     jobId: status.jobId,
     status: status.status,
-    results: results.results,
+    results: results.results.map(mapPublicJobResult),
   };
 }
