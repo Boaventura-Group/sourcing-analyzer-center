@@ -88,6 +88,7 @@ export function createLwaClient(config: AmazonConfig, dependencies: LwaClientDep
   const fetchImpl = dependencies.fetch ?? globalThis.fetch;
   const nowMs = dependencies.nowMs ?? Date.now;
   let cachedToken: AmazonAccessToken | undefined;
+  let inFlightRefresh: Promise<AmazonAccessToken> | undefined;
 
   async function refreshAccessToken(): Promise<AmazonAccessToken> {
     const body = new URLSearchParams();
@@ -120,7 +121,14 @@ export function createLwaClient(config: AmazonConfig, dependencies: LwaClientDep
         return cachedToken;
       }
 
-      cachedToken = await refreshAccessToken();
+      inFlightRefresh ??= refreshAccessToken();
+
+      try {
+        cachedToken = await inFlightRefresh;
+      } finally {
+        inFlightRefresh = undefined;
+      }
+
       return cachedToken;
     },
   };

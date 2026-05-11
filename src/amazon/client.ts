@@ -7,8 +7,6 @@ const USER_AGENT = 'sourcing-analyzer-center/0.1 (Language=TypeScript)';
 const COMPETITIVE_SUMMARY_PATH = '/batches/products/pricing/2022-05-01/items/competitiveSummary';
 const COMPETITIVE_SUMMARY_URI = '/products/pricing/2022-05-01/items/competitiveSummary';
 const FEES_ESTIMATES_PATH = '/products/fees/v0/feesEstimate';
-const CURRENCY_CODE = 'GBP';
-
 export type AmazonFeesEstimateInput = {
   asin: string;
   listingPrice: number;
@@ -186,7 +184,7 @@ export function createAmazonSpApiClient(
             IsAmazonFulfilled: true,
             PriceToEstimateFees: {
               ListingPrice: {
-                CurrencyCode: CURRENCY_CODE,
+                CurrencyCode: config.currencyCode,
                 Amount: item.listingPrice,
               },
             },

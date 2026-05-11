@@ -16,22 +16,34 @@ describe('createAmazonConfig', () => {
       region: 'eu-west-1',
       endpoint: 'https://sellingpartnerapi-eu.amazon.com',
       marketplaceId: 'A1F83G8C2ARO7P',
+      currencyCode: 'GBP',
     });
   });
 
-  it('loads explicit endpoint, region, and marketplace overrides', () => {
+  it('loads explicit endpoint, region, marketplace, and currency overrides', () => {
     expect(
       createAmazonConfig({
         ...requiredEnv,
         AMAZON_REGION: 'eu-west-2',
         AMAZON_SPAPI_ENDPOINT: 'https://example.test',
         AMAZON_MARKETPLACE_ID: 'TEST_MARKETPLACE',
+        AMAZON_CURRENCY_CODE: 'EUR',
       }),
     ).toMatchObject({
       region: 'eu-west-2',
       endpoint: 'https://example.test',
       marketplaceId: 'TEST_MARKETPLACE',
+      currencyCode: 'EUR',
     });
+  });
+
+  it('requires an explicit currency when overriding the default marketplace', () => {
+    expect(() =>
+      createAmazonConfig({
+        ...requiredEnv,
+        AMAZON_MARKETPLACE_ID: 'TEST_MARKETPLACE',
+      }),
+    ).toThrow('AMAZON_CURRENCY_CODE is required when AMAZON_MARKETPLACE_ID is overridden');
   });
 
   it('rejects missing LWA credentials', () => {

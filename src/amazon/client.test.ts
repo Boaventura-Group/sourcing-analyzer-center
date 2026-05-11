@@ -10,6 +10,7 @@ const config: AmazonConfig = {
   region: 'eu-west-1',
   endpoint: 'https://sellingpartnerapi-eu.amazon.com',
   marketplaceId: 'A1F83G8C2ARO7P',
+  currencyCode: 'GBP',
 };
 
 const validToken: AmazonAccessToken = {
@@ -134,6 +135,41 @@ describe('createAmazonSpApiClient', () => {
         },
         IdType: 'ASIN',
         IdValue: 'B000TEST02',
+      },
+    ]);
+  });
+
+  it('uses the configured marketplace currency for fee estimate requests', async () => {
+    const requests: Array<{ input: string; init: RequestInit }> = [];
+    const fetch: typeof globalThis.fetch = async (input, init = {}) => {
+      requests.push({ input: String(input), init });
+      return jsonResponse([]);
+    };
+    const client = createAmazonSpApiClient(
+      { ...config, marketplaceId: 'A13V1IB3VIYZZH', currencyCode: 'EUR' },
+      {
+        fetch,
+        getAccessToken: async () => validToken,
+      },
+    );
+
+    await client.getMyFeesEstimates([{ asin: 'B000TEST01', listingPrice: 9.99 }]);
+
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual([
+      {
+        FeesEstimateRequest: {
+          MarketplaceId: 'A13V1IB3VIYZZH',
+          IsAmazonFulfilled: true,
+          PriceToEstimateFees: {
+            ListingPrice: {
+              CurrencyCode: 'EUR',
+              Amount: 9.99,
+            },
+          },
+          Identifier: 'B000TEST01',
+        },
+        IdType: 'ASIN',
+        IdValue: 'B000TEST01',
       },
     ]);
   });

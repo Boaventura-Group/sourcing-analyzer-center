@@ -9,6 +9,7 @@ const config: AmazonConfig = {
   region: 'eu-west-1',
   endpoint: 'https://sellingpartnerapi-eu.amazon.com',
   marketplaceId: 'A1F83G8C2ARO7P',
+  currencyCode: 'GBP',
 };
 
 function jsonResponse(body: unknown, status = 200): Response {
@@ -65,6 +66,36 @@ describe('createLwaClient', () => {
     now = 3_610_000 - 59_000;
     await expect(client.getAccessToken()).resolves.toMatchObject({ accessToken: 'access-token-2' });
     expect(tokenNumber).toBe(2);
+  });
+
+  it('collapses concurrent LWA refreshes into one in-flight request', async () => {
+    let tokenRequests = 0;
+    let releaseRefresh: (() => void) | undefined;
+    let markRefreshStarted: (() => void) | undefined;
+    const refreshStarted = new Promise<void>((resolve) => {
+      markRefreshStarted = resolve;
+    });
+    const fetch: typeof globalThis.fetch = async () => {
+      tokenRequests += 1;
+      markRefreshStarted?.();
+      await new Promise<void>((release) => {
+        releaseRefresh = release;
+      });
+      return jsonResponse({ access_token: 'access-token', expires_in: 3600 });
+    };
+
+    const client = createLwaClient(config, { fetch, nowMs: () => 1_000 });
+    const first = client.getAccessToken();
+    const second = client.getAccessToken();
+
+    await refreshStarted;
+    releaseRefresh?.();
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { accessToken: 'access-token', expiresAtMs: 3_601_000 },
+      { accessToken: 'access-token', expiresAtMs: 3_601_000 },
+    ]);
+    expect(tokenRequests).toBe(1);
   });
 
   it('throws sanitized LWA errors without exposing client secret or refresh token', async () => {
