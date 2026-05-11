@@ -154,11 +154,7 @@ async function routeRequest(
 function validateInternalAuth(request: Request, env: Env): Response | null {
   const configuredToken = env.SAC_INTERNAL_TOKEN;
 
-  if (!configuredToken) {
-    return jsonError('internal_auth_not_configured', 'Internal authentication is not configured', 500);
-  }
-
-  if (request.headers.get(INTERNAL_TOKEN_HEADER) !== configuredToken) {
+  if (!configuredToken || request.headers.get(INTERNAL_TOKEN_HEADER) !== configuredToken) {
     return jsonError('unauthorized', 'Unauthorized', 401);
   }
 

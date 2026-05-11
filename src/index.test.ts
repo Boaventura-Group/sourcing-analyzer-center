@@ -488,6 +488,26 @@ describe('internal job endpoint auth', () => {
     });
   });
 
+  it('rejects job endpoints as unauthorized when the runtime token is not configured', async () => {
+    const env = createTestEnv();
+    delete (env as Partial<Env>).SAC_INTERNAL_TOKEN;
+
+    const response = await worker.fetch(
+      new Request('https://example.test/jobs/job_missing', {
+        headers: { 'x-sac-internal-token': INTERNAL_TOKEN },
+      }),
+      env,
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: {
+        code: 'unauthorized',
+        message: 'Unauthorized',
+      },
+    });
+  });
+
   it.each([
     ['GET /jobs/:jobId', 'https://example.test/jobs/job_missing'],
     ['GET /jobs/:jobId/results', 'https://example.test/jobs/job_missing/results'],
