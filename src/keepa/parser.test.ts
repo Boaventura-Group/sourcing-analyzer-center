@@ -79,6 +79,54 @@ describe('parseKeepaProductMetrics', () => {
     expect(metrics.buyBoxPrice).toBeUndefined();
   });
 
+  it('uses stats.current when history=0 responses omit csv', () => {
+    const metrics = parseKeepaProductMetrics({
+      asin: 'B000TEST01',
+      title: 'History disabled product',
+      stats: {
+        current: [
+          undefined,
+          undefined,
+          undefined,
+          9876,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          5,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          42,
+          123,
+          1599,
+        ],
+        avg30: [undefined, undefined, undefined, 9000],
+        avg90: [undefined, undefined, undefined, 8500],
+        salesRankDrops30: 3,
+        salesRankDrops90: 12,
+      },
+    });
+
+    expect(metrics).toMatchObject({
+      asin: 'B000TEST01',
+      title: 'History disabled product',
+      buyBoxPrice: 15.99,
+      rating: 4.2,
+      reviewCount: 123,
+      bsrCurrent: 9876,
+      avgBsr30: 9000,
+      avgBsr90: 8500,
+      salesRankDrops30: 3,
+      salesRankDrops90: 12,
+      offerCount: 5,
+    });
+  });
+
   it('rejects humanized csv objects because raw Keepa csv must be int[][]', () => {
     expect(() =>
       parseKeepaProductMetrics({

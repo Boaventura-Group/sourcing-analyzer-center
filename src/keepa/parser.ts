@@ -7,6 +7,7 @@ const CsvType = {
 } as const;
 
 type KeepaStats = {
+  current?: unknown;
   avg30?: unknown;
   avg90?: unknown;
   salesRankDrops30?: unknown;
@@ -36,6 +37,10 @@ export type KeepaProductMetrics = {
 };
 
 function assertCsvArray(csv: unknown): Array<unknown> {
+  if (csv === undefined || csv === null) {
+    return [];
+  }
+
   if (!Array.isArray(csv)) {
     throw new Error('Keepa raw csv must be an int[][] array');
   }
@@ -119,6 +124,7 @@ function setOptionalNumber<T extends Record<string, unknown>>(
 
 export function parseKeepaProductMetrics(product: KeepaRawProduct): KeepaProductMetrics {
   const csv = assertCsvArray(product.csv);
+  const statsCurrent = product.stats?.current;
   const result: KeepaProductMetrics = {
     asin: product.asin,
     raw: product,
@@ -128,11 +134,34 @@ export function parseKeepaProductMetrics(product: KeepaRawProduct): KeepaProduct
     result.title = product.title;
   }
 
-  setOptionalNumber(result, 'buyBoxPrice', minorUnitToGbp(getSeriesLastNumber(csv, CsvType.BUY_BOX_SHIPPING)));
-  setOptionalNumber(result, 'rating', ratingToStars(getSeriesLastNumber(csv, CsvType.RATING)));
-  setOptionalNumber(result, 'reviewCount', getSeriesLastNumber(csv, CsvType.COUNT_REVIEWS));
-  setOptionalNumber(result, 'bsrCurrent', getSeriesLastNumber(csv, CsvType.SALES));
-  setOptionalNumber(result, 'offerCount', getSeriesLastNumber(csv, CsvType.COUNT_NEW));
+  setOptionalNumber(
+    result,
+    'buyBoxPrice',
+    minorUnitToGbp(
+      getSeriesLastNumber(csv, CsvType.BUY_BOX_SHIPPING) ??
+        getStatsIndexedNumber(statsCurrent, CsvType.BUY_BOX_SHIPPING),
+    ),
+  );
+  setOptionalNumber(
+    result,
+    'rating',
+    ratingToStars(getSeriesLastNumber(csv, CsvType.RATING) ?? getStatsIndexedNumber(statsCurrent, CsvType.RATING)),
+  );
+  setOptionalNumber(
+    result,
+    'reviewCount',
+    getSeriesLastNumber(csv, CsvType.COUNT_REVIEWS) ?? getStatsIndexedNumber(statsCurrent, CsvType.COUNT_REVIEWS),
+  );
+  setOptionalNumber(
+    result,
+    'bsrCurrent',
+    getSeriesLastNumber(csv, CsvType.SALES) ?? getStatsIndexedNumber(statsCurrent, CsvType.SALES),
+  );
+  setOptionalNumber(
+    result,
+    'offerCount',
+    getSeriesLastNumber(csv, CsvType.COUNT_NEW) ?? getStatsIndexedNumber(statsCurrent, CsvType.COUNT_NEW),
+  );
 
   if (product.stats !== undefined) {
     setOptionalNumber(result, 'avgBsr30', getStatsIndexedNumber(product.stats.avg30, CsvType.SALES));
